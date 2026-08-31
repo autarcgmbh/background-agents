@@ -29,7 +29,7 @@ ARG AIR_VERSION=v1.62.0
 ARG OP_VERSION=2.35.0-beta.01
 ARG STRIPE_CLI_VERSION=1.40.9
 ARG MKCERT_VERSION=v1.4.4
-ARG GCX_VERSION=0.4.4
+ARG GCX_VERSION=1.2.0
 
 # $HOME is /root at build time and /home/user at runtime. COREPACK_HOME is re-pinned at
 # runtime by E2B_SANDBOX_ENV
