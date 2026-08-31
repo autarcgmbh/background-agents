@@ -18,7 +18,7 @@ variable "template_id" {
 variable "template_cpu" {
   description = "vCPU count for the template"
   type        = number
-  default     = 2
+  default     = 8
 
   validation {
     condition     = var.template_cpu == floor(var.template_cpu) && var.template_cpu >= 1
@@ -29,7 +29,7 @@ variable "template_cpu" {
 variable "template_memory_mb" {
   description = "Memory (MB, even number) for the template"
   type        = number
-  default     = 4096
+  default     = 8192
 
   validation {
     condition = (

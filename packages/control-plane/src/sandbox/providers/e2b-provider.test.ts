@@ -162,6 +162,28 @@ describe("E2BSandboxProvider", () => {
     });
   });
 
+  it("pins the toolchain env the Dockerfile can only set at build time", async () => {
+    // E2B drops Docker ENV
+    const client = mockClient();
+    await new E2BSandboxProvider(client, providerConfig).createSandbox({
+      ...baseCreateConfig,
+      userEnvVars: { GOTOOLCHAIN: "evil", COREPACK_HOME: "/evil" },
+    });
+    expect(createEnv(client)).toMatchObject({
+      COREPACK_HOME: "/opt/corepack",
+      PNPM_HOME: "/opt/pnpm-home",
+      GOPATH: "/opt/go",
+      GOMODCACHE: "/opt/go/pkg/mod",
+      GOTOOLCHAIN: "local",
+    });
+  });
+
+  it("does not pin PATH, which envd ignores in favour of its own", async () => {
+    const client = mockClient();
+    await new E2BSandboxProvider(client, providerConfig).createSandbox(baseCreateConfig);
+    expect(createEnv(client)).not.toHaveProperty("PATH");
+  });
+
   it("injects SANDBOX_VERSION so sessions report a runtime version to the bridge", async () => {
     const client = mockClient();
     await new E2BSandboxProvider(client, providerConfig).createSandbox(baseCreateConfig);

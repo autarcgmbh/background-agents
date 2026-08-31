@@ -548,15 +548,15 @@ variable "e2b_auto_pause" {
 }
 
 variable "e2b_template_cpu" {
-  description = "vCPU count for the E2B sandbox template (and every sandbox created from it)."
+  description = "vCPU count for the E2B sandbox template (and every sandbox created from it). Default is E2B's documented per-sandbox maximum: the template bakes a container runtime and the prebuilt-image build runs a full monorepo install, build and test pass inside one sandbox."
   type        = number
-  default     = 2
+  default     = 8
 }
 
 variable "e2b_template_memory_mb" {
-  description = "Memory (MB, even number) for the E2B sandbox template. Default sized for the agent toolchain (OpenCode + code-server + builds); lower it on plans that cap sandbox memory. The full invariant (positive, even, integral) is validated at the e2b-infra module boundary."
+  description = "Memory (MB, even number) for the E2B sandbox template. Default is E2B's documented per-sandbox maximum, sized for the agent toolchain (OpenCode + code-server) plus a monorepo build and container-backed services in the same sandbox; lower it on plans that cap sandbox memory. Note that turbo and vitest size their worker pools from nproc rather than the cgroup quota, so a repository that builds here should also pin NODE_HEAP_MB / TURBO_CONCURRENCY / VITEST_MAX_WORKERS as secrets. The full invariant (positive, even, integral) is validated at the e2b-infra module boundary."
   type        = number
-  default     = 4096
+  default     = 8192
 }
 
 variable "nextauth_secret" {

@@ -18,31 +18,102 @@ FROM python:3.12-slim-bookworm
 ARG OPENCODE_VERSION=1.18.18
 ARG CODE_SERVER_VERSION=4.109.5
 ARG AGENT_BROWSER_VERSION=0.21.2
+ARG TTYD_VERSION=1.7.7
+ARG TTYD_SHA256=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
+
+ARG NODE_MAJOR=24
+ARG PNPM_VERSION=11.11.0
+ARG GO_VERSION=1.25.8
+ARG GOLANGCI_LINT_VERSION=2.6.2
+ARG AIR_VERSION=v1.62.0
+ARG OP_VERSION=2.35.0-beta.01
+ARG STRIPE_CLI_VERSION=1.40.9
+ARG MKCERT_VERSION=v1.4.4
+
+# $HOME is /root at build time and /home/user at runtime. COREPACK_HOME is re-pinned at
+# runtime by E2B_SANDBOX_ENV
+ENV COREPACK_HOME=/opt/corepack
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # System packages: git/build toolchain + browser and VNC/noVNC dependencies.
 RUN apt-get update \
   && apt-get install -y git curl build-essential ca-certificates gnupg \
-     openssh-client jq unzip libnss3 libnspr4 libatk1.0-0 \
+     openssh-client jq unzip libnss3 libnss3-tools libnspr4 libatk1.0-0 \
      libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
      libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
      libpango-1.0-0 libcairo2 ffmpeg xvfb fluxbox x11vnc websockify novnc \
+     sudo passwd adduser procps sysvinit-utils iptables uidmap fuse-overlayfs \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' \
      > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/* \
-  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
   && apt-get install -y nodejs \
-  && npm install -g pnpm@latest \
+  && corepack enable \
+  && corepack install -g "pnpm@${PNPM_VERSION}" \
+  # The runtime `user` must be able to read what corepack unpacked as root.
+  && chmod -R a+rX /opt/corepack \
   # Install bun system-wide (not /root/.bun, which the runtime `user` can't read).
   && curl -fsSL https://bun.sh/install \
      | BUN_INSTALL=/usr/local bash \
   && python -m pip install --upgrade pip
 
+# Passwordless sudo for E2B's non-root runtime account, so .openinspect/start.sh
+# can bring up dockerd. E2B creates `user` in its own layer, so this is a
+# name-based grant for an account that does not exist yet at build time.
+RUN printf '%s\n' 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/oi-user \
+  && chmod 0440 /etc/sudoers.d/oi-user
+
+# Docker engine, for repositories whose setup/start hooks bring up service
+# containers. dockerd is started by the boot hook, never by this image.
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg \
+     -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+     > /etc/apt/sources.list.d/docker.list \
+  && apt-get update \
+  && apt-get install -y docker-ce docker-ce-cli containerd.io \
+     docker-buildx-plugin docker-compose-plugin \
+  && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain. Symlinked into /usr/local/bin rather than extending PATH, so the
+# runtime PATH stays a plain superset of Debian's default.
+# GOTOOLCHAIN=local (pinned at runtime in E2B_SANDBOX_ENV) stops a `toolchain`
+# directive in a go.mod from downloading a second SDK on first build.
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+     | tar -C /usr/local -xzf - \
+  && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+  && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+  && curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" \
+     | tar -C /usr/local/bin -xzf - --strip-components=1 --wildcards '*/golangci-lint' \
+  && chmod +x /usr/local/bin/golangci-lint \
+  && GOPATH=/tmp/gobuild GOBIN=/usr/local/bin GOFLAGS=-mod=mod \
+     go install "github.com/air-verse/air@${AIR_VERSION}" \
+  && rm -rf /tmp/gobuild
+
+# Workload CLIs. Version-pinned copies of the installs proven in
+# tools/coder/image/workspace.Dockerfile:
+#   op     — renders .env files from 1Password (the beta line is what ships `op environment`)
+#   stripe — local webhook signing secret
+#   mkcert — local TLS certs for the API's HTTP/2 dev server
+RUN curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_amd64_v${OP_VERSION}.zip" \
+     -o /tmp/op.zip \
+  && unzip -o /tmp/op.zip -d /usr/local/bin op \
+  && chmod +x /usr/local/bin/op \
+  && rm /tmp/op.zip \
+  && curl -fsSL "https://github.com/stripe/stripe-cli/releases/download/v${STRIPE_CLI_VERSION}/stripe_${STRIPE_CLI_VERSION}_linux_x86_64.tar.gz" \
+     | tar -C /usr/local/bin -xzf - stripe \
+  && chmod +x /usr/local/bin/stripe \
+  && curl -fsSL -o /usr/local/bin/mkcert \
+     "https://github.com/FiloSottile/mkcert/releases/download/${MKCERT_VERSION}/mkcert-${MKCERT_VERSION}-linux-amd64" \
+  && chmod +x /usr/local/bin/mkcert
+
 # Python runtime deps for the supervisor + bridge.
 RUN pip install uv httpx websockets "pydantic>=2.0" "PyJWT[crypto]"
 
-# Agent toolchain: OpenCode, code-server, agent-browser.
+# Agent toolchain: OpenCode, code-server, agent-browser, ttyd.
 RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
   && npm install -g "@opencode-ai/plugin@${OPENCODE_VERSION}" zod \
   && curl -fsSL -o /tmp/code-server.deb \
@@ -51,10 +122,52 @@ RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
   && rm /tmp/code-server.deb \
   && npm install -g "agent-browser@${AGENT_BROWSER_VERSION}" \
   && agent-browser install \
+  && curl -fsSL -o /usr/local/bin/ttyd \
+     "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+  && echo "${TTYD_SHA256}  /usr/local/bin/ttyd" | sha256sum -c - \
+  && chmod +x /usr/local/bin/ttyd \
   && mkdir -p /workspace /app /tmp/opencode \
   # E2B runs as non-root `user`; the supervisor clones into /workspace and writes
   # /tmp/opencode, so make them world-writable (sticky).
   && chmod 1777 /workspace /tmp/opencode
+
+# Pre-build OpenCode's plugin deps, mirroring modal-infra/src/images/base.py.
+# Without this, OpenCode's Npm.install() runs an arborist reify() (2-22s) before
+# the first prompt of EVERY session, prebuilt or not. Staged twice: /app for the
+# per-session .opencode/ copy, and OpenCode's global config dir so the runtime's
+# _seed_global_opencode_deps() finds node_modules already present and no-ops.
+#
+# E2B's HOME is /home/user (e2b-provider.ts), not Modal's /root, and
+# opencode_server.py resolves the global config dir from Path.home(). The
+# account is created by E2B after this layer, so chown numerically and treat the
+# seed as best-effort — the runtime falls back to copying if E2B shadows it.
+RUN mkdir -p /app/opencode-deps \
+  && echo "{\"name\":\"opencode-tools\",\"type\":\"module\",\"dependencies\":{\"@opencode-ai/plugin\":\"${OPENCODE_VERSION}\"}}" \
+     > /app/opencode-deps/package.json \
+  && cd /app/opencode-deps \
+  && npm install --ignore-scripts --no-audit --no-fund \
+  && mkdir -p /home/user/.config/opencode \
+  && cp -a /app/opencode-deps/. /home/user/.config/opencode/ \
+  && chown -R 1000:1000 /home/user \
+  && chmod -R a+rX /app/opencode-deps
+
+# envd runs every sandbox process with its own PATH
+# (/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games) and ignores a
+# create-time PATH, so /usr/sbin is unreachable from the non-login shells that
+# sandbox commands run in — the gap the Modal image closes with image ENV, which
+# E2B drops. Link the handful that matters into /usr/local/bin instead. dockerd
+# itself is unaffected: the boot hook starts it through sudo, whose secure_path
+# already includes the sbin directories.
+RUN for tool in iptables ip6tables iptables-save iptables-restore \
+                useradd usermod groupadd service; do \
+      ln -sf "/usr/sbin/$tool" "/usr/local/bin/$tool"; \
+    done
+
+# Shared, world-writable caches. A prebuilt repo image warms these during its
+# build and the snapshot carries them into every session; they live outside
+# $HOME so the build (root) and the session (`user`) address them identically.
+RUN mkdir -p /opt/pnpm-store /opt/pnpm-home /opt/turbo-cache /opt/go/bin /opt/go/pkg/mod \
+  && chmod -R 1777 /opt/pnpm-store /opt/pnpm-home /opt/turbo-cache /opt/go
 
 # Put /app on Python's import path via a .pth file so `python3 -m sandbox_runtime`
 # resolves without a PYTHONPATH env var. build-template.py stages sandbox_runtime
@@ -76,8 +189,11 @@ RUN printf '%s\n' '#!/bin/sh' 'exec python3 -m sandbox_runtime.credentials.git_c
   && git config --system credential.useHttpPath true
 
 # Build-time env only. E2B does NOT propagate Docker ENV to the runtime process:
-# everything the supervisor needs (HOME/PYTHONPATH/NODE_PATH, CONTROL_PLANE_URL,
-# secrets, …) is injected by the control plane via create-time envVars.
+# everything the supervisor needs (HOME/PYTHONPATH/NODE_PATH, PATH, COREPACK_HOME,
+# GOPATH, CONTROL_PLANE_URL, secrets, …) is injected by the control plane via
+# create-time envVars — see E2B_SANDBOX_ENV in
+# packages/control-plane/src/sandbox/providers/e2b-provider.ts. Anything added
+# here that a session needs must be added there too.
 #
 # Deliberately no SANDBOX_VERSION here. It would never reach the supervisor (see
 # above), so a literal could only rot: image selection gates on the version the

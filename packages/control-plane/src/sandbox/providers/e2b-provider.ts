@@ -122,6 +122,32 @@ const E2B_SANDBOX_ENV: Record<string, string> = {
   OI_SCM_CRED_CACHE_DIR: "/tmp/oi",
   // So the runtime reports a version (spawn-time image selection gates on it).
   SANDBOX_VERSION: E2B_SANDBOX_VERSION,
+  // Deliberately NO PATH. envd overrides it with its own
+  // (/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games) and silently
+  // ignores a create-time value, unlike every other key here — so a PATH entry
+  // would read as a fix while changing nothing. The Modal image closes the same
+  // /usr/sbin gap through image ENV (base.py, v61), which E2B also drops; on
+  // E2B the equivalent is a build-time symlink into /usr/local/bin, so
+  // e2b.Dockerfile links the sbin helpers there instead.
+  //
+  // Toolchain state that the Dockerfile sets as build-time ENV and E2B drops.
+  // Each points at a world-writable path outside $HOME so the image build (root)
+  // and the session (`user`) resolve it identically, and so a prebuilt repo
+  // image's warmed caches are found rather than silently re-populated.
+  COREPACK_HOME: "/opt/corepack",
+  // pnpm's global bin dir (`pnpm add -g`), not its content-addressable store —
+  // the store is set per-repo by the setup hook, since it has to sit on the same
+  // filesystem as the checkout for hardlinking to work. Set so pnpm does not
+  // refuse a global install outright; it is not on envd's PATH (see above), so a
+  // hook installing a binary it needs on PATH must link it into /usr/local/bin,
+  // which it can do with sudo.
+  PNPM_HOME: "/opt/pnpm-home",
+  GOPATH: "/opt/go",
+  GOMODCACHE: "/opt/go/pkg/mod",
+  // The baked Go SDK satisfies every `go` directive in the repositories we
+  // serve; `local` stops a `toolchain` line from downloading a second SDK on
+  // first build, which would defeat the point of baking one.
+  GOTOOLCHAIN: "local",
 };
 
 /**

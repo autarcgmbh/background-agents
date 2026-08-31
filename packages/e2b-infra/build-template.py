@@ -19,6 +19,7 @@ Env:
 import atexit
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.error
@@ -28,6 +29,23 @@ from pathlib import Path
 from e2b import Template, default_build_logger
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+
+DOCKERFILE = (SCRIPT_DIR / "e2b.Dockerfile").read_text()
+
+
+def dockerfile_arg(name: str) -> str:
+    """Read an ARG default out of e2b.Dockerfile.
+
+    READY_CMD asserts the versions the image actually baked. Reading them back
+    from the Dockerfile keeps one source of truth per pin: a literal here would
+    silently stop matching the image the first time someone bumps an ARG.
+    """
+    match = re.search(rf"^ARG {re.escape(name)}=(.+)$", DOCKERFILE, re.MULTILINE)
+    if not match:
+        print(f"Error: ARG {name} not found in e2b.Dockerfile", file=sys.stderr)
+        sys.exit(1)
+    return match.group(1).strip()
+
 
 TEMPLATE_ID = os.environ.get("E2B_TEMPLATE_ID")
 API_KEY = os.environ.get("E2B_API_KEY")
@@ -52,11 +70,58 @@ if MEM < 2 or MEM % 2 != 0:
 # fail the build instead of every later session. E2B resumes the captured
 # `sleep` on each create from the base template — one harmless idle process.
 START_CMD = "sleep infinity"
-READY_CMD = (
-    "command -v python && command -v node && command -v bun && command -v opencode "
-    "&& command -v code-server "
-    '&& test "$(command -v gh)" = /usr/local/bin/gh && test -x /usr/bin/gh '
-    "&& PYTHONPATH=/app python -c 'import sandbox_runtime'"
+# Every tool the image bakes is asserted here. E2B evaluates READY_CMD during
+# template finalization, which is the one place a broken toolchain layer fails
+# the build instead of failing every later session. Adding an install above
+# without adding it here ships the breakage silently.
+#
+# Versions are asserted, not just presence: a silently-floating Node or pnpm is
+# the failure mode that a prebuilt repo image cannot recover from, because its
+# node_modules was installed against whatever was here at build time.
+READY_CMD = " && ".join(
+    [
+        # Agent runtime + sandbox supervisor.
+        "command -v python",
+        "command -v bun",
+        "command -v opencode",
+        "command -v code-server",
+        "command -v ttyd",
+        'test "$(command -v gh)" = /usr/local/bin/gh',
+        "test -x /usr/bin/gh",
+        "PYTHONPATH=/app python -c 'import sandbox_runtime'",
+        # Pre-staged OpenCode plugin deps (skips a 2-22s reify() per session).
+        "test -d /app/opencode-deps/node_modules",
+        # Workload toolchain, version-pinned.
+        f'case "$(node --version)" in v{dockerfile_arg("NODE_MAJOR")}.*) ;; *) exit 1 ;; esac',
+        # COREPACK_HOME is spelled out rather than inherited: a bare `pnpm` here
+        # resolves through corepack's own fallback (it reports whatever version
+        # corepack ships when no package.json pins one), which would make this
+        # assertion pass while telling us nothing. What actually matters is that
+        # the pinned version is already unpacked in the shared corepack home, so
+        # the first `pnpm` inside a checkout does not go to the network.
+        f'test "$(COREPACK_HOME=/opt/corepack pnpm --version)" = "{dockerfile_arg("PNPM_VERSION")}"',
+        f'test "$(go env GOVERSION)" = "go{dockerfile_arg("GO_VERSION")}"',
+        "command -v gofmt",
+        "command -v golangci-lint",
+        "command -v air",
+        "command -v op",
+        "command -v stripe",
+        "command -v mkcert",
+        # Service containers for repositories whose hooks need them. dockerd is
+        # started by the boot hook, so only the binaries are checked here.
+        "command -v dockerd",
+        "command -v docker",
+        "docker compose version",
+        "command -v sudo",
+        # Reachable only because of the /usr/sbin symlinks in the Dockerfile;
+        # envd's PATH does not include the sbin directories.
+        "command -v iptables",
+        "command -v useradd",
+        # Shared caches a prebuilt repo image warms during its build.
+        "test -w /opt/pnpm-store",
+        "test -w /opt/turbo-cache",
+        "test -w /opt/go",
+    ]
 )
 
 if not TEMPLATE_ID:
@@ -88,13 +153,11 @@ def _ignore_pycache(src: str, names: list[str]) -> list[str]:
 shutil.copytree(RUNTIME_SRC, STAGED, ignore=_ignore_pycache)
 atexit.register(lambda: shutil.rmtree(STAGED, ignore_errors=True))
 
-dockerfile = (SCRIPT_DIR / "e2b.Dockerfile").read_text()
-
 print(f"Building E2B template: {TEMPLATE_ID} (cpu={CPU}, mem={MEM})")
 
 template = (
     Template()
-    .from_dockerfile(dockerfile)
+    .from_dockerfile(DOCKERFILE)
     # Staged into this dir above; imported via PYTHONPATH=/app as `sandbox_runtime`.
     .copy("sandbox_runtime", "/app/sandbox_runtime")
     # E2B's non-root runtime cannot install this into /usr/local/bin itself.
