@@ -29,6 +29,7 @@ ARG AIR_VERSION=v1.62.0
 ARG OP_VERSION=2.35.0-beta.01
 ARG STRIPE_CLI_VERSION=1.40.9
 ARG MKCERT_VERSION=v1.4.4
+ARG GCX_VERSION=0.4.4
 
 # $HOME is /root at build time and /home/user at runtime. COREPACK_HOME is re-pinned at
 # runtime by E2B_SANDBOX_ENV
@@ -43,6 +44,7 @@ RUN apt-get update \
      libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 \
      libpango-1.0-0 libcairo2 ffmpeg xvfb fluxbox x11vnc websockify novnc \
      sudo passwd adduser procps sysvinit-utils iptables uidmap fuse-overlayfs \
+     postgresql-client \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' \
@@ -98,6 +100,10 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
 #   op     — renders .env files from 1Password (the beta line is what ships `op environment`)
 #   stripe — local webhook signing secret
 #   mkcert — local TLS certs for the API's HTTP/2 dev server
+#   gcx    — Grafana Cloud CLI, for querying the deployed stack's logs/metrics.
+#            No credentials baked in: it resolves GRAFANA_SERVER/GRAFANA_TOKEN on
+#            every invocation, so a session authenticates from repository secrets
+#            rather than an interactive `gcx login`.
 RUN curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_linux_amd64_v${OP_VERSION}.zip" \
      -o /tmp/op.zip \
   && unzip -o /tmp/op.zip -d /usr/local/bin op \
@@ -108,7 +114,10 @@ RUN curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_li
   && chmod +x /usr/local/bin/stripe \
   && curl -fsSL -o /usr/local/bin/mkcert \
      "https://github.com/FiloSottile/mkcert/releases/download/${MKCERT_VERSION}/mkcert-${MKCERT_VERSION}-linux-amd64" \
-  && chmod +x /usr/local/bin/mkcert
+  && chmod +x /usr/local/bin/mkcert \
+  && curl -fsSL "https://github.com/grafana/gcx/releases/download/v${GCX_VERSION}/gcx_${GCX_VERSION}_linux_amd64.tar.gz" \
+     | tar -C /usr/local/bin -xzf - gcx \
+  && chmod +x /usr/local/bin/gcx
 
 # Python runtime deps for the supervisor + bridge.
 RUN pip install uv httpx websockets "pydantic>=2.0" "PyJWT[crypto]"

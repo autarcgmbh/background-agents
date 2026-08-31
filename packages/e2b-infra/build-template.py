@@ -107,6 +107,8 @@ READY_CMD = " && ".join(
         "command -v op",
         "command -v stripe",
         "command -v mkcert",
+        "command -v gcx",
+        "command -v psql",
         # Service containers for repositories whose hooks need them. dockerd is
         # started by the boot hook, so only the binaries are checked here.
         "command -v dockerd",
