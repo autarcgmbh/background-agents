@@ -178,6 +178,15 @@ describe("E2BSandboxProvider", () => {
     });
   });
 
+  it("pins the PostHog cloud posthog-cli talks to, so only the API key is a secret", async () => {
+    const client = mockClient();
+    await new E2BSandboxProvider(client, providerConfig).createSandbox({
+      ...baseCreateConfig,
+      userEnvVars: { POSTHOG_CLI_HOST: "https://us.posthog.com" },
+    });
+    expect(createEnv(client).POSTHOG_CLI_HOST).toBe("https://eu.posthog.com");
+  });
+
   it("does not pin PATH, which envd ignores in favour of its own", async () => {
     const client = mockClient();
     await new E2BSandboxProvider(client, providerConfig).createSandbox(baseCreateConfig);

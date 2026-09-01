@@ -108,6 +108,13 @@ READY_CMD = " && ".join(
         "command -v stripe",
         "command -v mkcert",
         "command -v gcx",
+        f'test "$(posthog-cli --version)" = "posthog-cli {dockerfile_arg("POSTHOG_CLI_VERSION")}"',
+        # Presence only: `wizard --version` reports "unknown", and npm enforces the
+        # pin at install time anyway, unlike the apt/corepack toolchain above.
+        "command -v wizard",
+        # Agent skills and rules the image bakes into the runtime HOME.
+        "test -d /home/user/.agents/skills/debug-with-grafana",
+        "grep -q posthog-cli /home/user/.config/opencode/AGENTS.md",
         "command -v psql",
         # Service containers for repositories whose hooks need them. dockerd is
         # started by the boot hook, so only the binaries are checked here.

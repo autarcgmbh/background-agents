@@ -148,6 +148,7 @@ const E2B_SANDBOX_ENV: Record<string, string> = {
   // serve; `local` stops a `toolchain` line from downloading a second SDK on
   // first build, which would defeat the point of baking one.
   GOTOOLCHAIN: "local",
+  POSTHOG_CLI_HOST: "https://eu.posthog.com",
 };
 
 /**

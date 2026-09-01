@@ -30,6 +30,8 @@ ARG OP_VERSION=2.35.0-beta.01
 ARG STRIPE_CLI_VERSION=1.40.9
 ARG MKCERT_VERSION=v1.4.4
 ARG GCX_VERSION=1.2.0
+ARG POSTHOG_CLI_VERSION=0.16.0
+ARG POSTHOG_WIZARD_VERSION=2.70.1
 
 # $HOME is /root at build time and /home/user at runtime. COREPACK_HOME is re-pinned at
 # runtime by E2B_SANDBOX_ENV
@@ -117,7 +119,10 @@ RUN curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VERSION}/op_li
   && chmod +x /usr/local/bin/mkcert \
   && curl -fsSL "https://github.com/grafana/gcx/releases/download/v${GCX_VERSION}/gcx_${GCX_VERSION}_linux_amd64.tar.gz" \
      | tar -C /usr/local/bin -xzf - gcx \
-  && chmod +x /usr/local/bin/gcx
+  && chmod +x /usr/local/bin/gcx \
+  && curl -fsSL "https://github.com/PostHog/posthog/releases/download/posthog-cli/v${POSTHOG_CLI_VERSION}/posthog-cli-x86_64-unknown-linux-gnu.tar.gz" \
+     | tar -C /usr/local/bin -xzf - --strip-components=1 --wildcards '*/posthog-cli' \
+  && chmod +x /usr/local/bin/posthog-cli
 
 # Python runtime deps for the supervisor + bridge.
 RUN pip install uv httpx websockets "pydantic>=2.0" "PyJWT[crypto]"
@@ -159,6 +164,13 @@ RUN mkdir -p /app/opencode-deps \
   && cp -a /app/opencode-deps/. /home/user/.config/opencode/ \
   && chown -R 1000:1000 /home/user \
   && chmod -R a+rX /app/opencode-deps
+
+RUN npm install -g "@posthog/wizard@${POSTHOG_WIZARD_VERSION}" \
+  && mkdir -p /home/user/.config/opencode \
+  && gcx agent skills install --all --dir /home/user/.agents \
+  && posthog-cli api agents-md install --path /home/user/.config/opencode/AGENTS.md \
+  && chown -R 1000:1000 /home/user \
+  && chmod -R a+rX /home/user/.agents
 
 # envd runs every sandbox process with its own PATH
 # (/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games) and ignores a
