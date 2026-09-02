@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -11,7 +13,13 @@ from urllib.parse import quote
 
 import httpx
 
-from .constants import BOOT_WARNINGS_FILE_PATH, IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR
+from .constants import (
+    BOOT_WARNINGS_FILE_PATH,
+    DOCKER_INFO_PROBE_TIMEOUT_SECONDS,
+    DOCKERD_LOG_FILE_PATH,
+    DOCKERD_PID_FILE_PATH,
+    IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR,
+)
 from .repo_image_callback import RepoImageBuildCallback
 from .runtime_config import BootMode, RuntimeConfig
 
@@ -72,6 +80,7 @@ class SandboxSupervisor:
         self.boot_mode = BootMode.FRESH
         self._desktop_restart_task: asyncio.Task[bool] | None = None
         self._repository_boot_result: RepositoryBootResult | None = None
+        self._docker_daemon: asyncio.subprocess.Process | None = None
 
     async def _report_fatal_error(self, message: str) -> None:
         self.log.error("supervisor.fatal", error_message=message)
@@ -108,6 +117,53 @@ class SandboxSupervisor:
                         await asyncio.sleep(delay_seconds)
         except Exception as error:
             self.log.error("supervisor.report_error_failed", exc=error)
+
+    async def _docker_daemon_already_running(self) -> bool:
+        """Whether some other supervisor of the sandbox already owns dockerd"""
+        if Path(DOCKERD_PID_FILE_PATH).exists():
+            return True
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "info",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return False
+        try:
+            return (
+                await asyncio.wait_for(process.wait(), timeout=DOCKER_INFO_PROBE_TIMEOUT_SECONDS)
+                == 0
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            return False
+
+    async def _start_docker_daemon(self) -> None:
+        """Start dockerd when the image ships one and nothing is running it yet"""
+        if shutil.which("dockerd") is None:
+            self.log.info("dockerd.skip", reason="not_installed")
+            return
+        if await self._docker_daemon_already_running():
+            self.log.info("dockerd.skip", reason="already_running")
+            return
+        try:
+            # The child inherits the descriptor, so this end can close as soon
+            # as the daemon is spawned; dockerd keeps writing to the file.
+            with Path(DOCKERD_LOG_FILE_PATH).open("wb") as log_file:
+                process = await asyncio.create_subprocess_exec(
+                    "dockerd",
+                    stdout=log_file,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
+        except OSError as error:
+            self.log.warn("dockerd.start_failed", exc=error)
+            return
+        self._docker_daemon = process
+        self.log.info("dockerd.started", pid=process.pid, log_path=DOCKERD_LOG_FILE_PATH)
 
     async def _start_desktop_with_retries(self) -> bool:
         attempt = 0
@@ -377,6 +433,8 @@ class SandboxSupervisor:
         if self.boot_mode is BootMode.BUILD and repo_image_callback is None:
             repo_image_callback = RepoImageBuildCallback.from_env(self.log)
 
+        await self._start_docker_daemon()
+
         expected_tunnel_ports = self.repository_boot.prepare_tunnel_environment(self.boot_mode)
         Path(BOOT_WARNINGS_FILE_PATH).unlink(missing_ok=True)
 
@@ -459,8 +517,13 @@ class SandboxSupervisor:
             if self.boot_mode is BootMode.BUILD and repo_image_callback:
                 try:
                     error_message = str(error)
+                    # Only the callback gets the hook's output; see
+                    # SetupHookFailedError for why it never reaches the log.
+                    output_tail = getattr(error, "output_tail", "")
                     await self._run_until_shutdown(
-                        lambda: repo_image_callback.report_failure(error_message)
+                        lambda: repo_image_callback.report_failure(
+                            error_message, output_tail=output_tail
+                        )
                     )
                 except ImageBuildExecutionCancelled:
                     self.log.info("image_build.cancelled", reason="shutdown_requested")

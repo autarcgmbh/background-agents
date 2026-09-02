@@ -65,7 +65,7 @@ class TestStartScriptSkip:
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is True
+        assert result.succeeded is True
         mock_exec.assert_not_called()
 
     async def test_skip_when_repo_path_missing(self, tmp_path):
@@ -74,7 +74,7 @@ class TestStartScriptSkip:
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is True
+        assert result.succeeded is True
         mock_exec.assert_not_called()
 
 
@@ -91,7 +91,7 @@ class TestStartScriptSuccess:
         ):
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is True
+        assert result.succeeded is True
 
     async def test_bash_called_with_correct_args(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
@@ -136,7 +136,7 @@ class TestStartScriptFailure:
         ):
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
 
     async def test_exception_returns_false(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
@@ -149,7 +149,7 @@ class TestStartScriptFailure:
         ):
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
 
 
 class TestStartScriptTimeout:
@@ -168,7 +168,7 @@ class TestStartScriptTimeout:
         ):
             result = await sup.hooks.run_start(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
         fake_proc.kill.assert_called_once()
         fake_proc.wait.assert_awaited_once()
 

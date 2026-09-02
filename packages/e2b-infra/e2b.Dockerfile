@@ -86,7 +86,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # runtime PATH stays a plain superset of Debian's default.
 # GOTOOLCHAIN=local (pinned at runtime in E2B_SANDBOX_ENV) stops a `toolchain`
 # directive in a go.mod from downloading a second SDK on first build.
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+# dl.google.com is the host go.dev/dl redirects to; its redirect handler
+# intermittently 500s, which fails the whole image build.
+RUN curl -fsSL --retry 3 --retry-all-errors "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
      | tar -C /usr/local -xzf - \
   && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
   && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \

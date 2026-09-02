@@ -58,6 +58,22 @@ IMAGE_BUILD_EXECUTION_TIMEOUT_ENV_VAR = "OI_IMAGE_BUILD_EXECUTION_TIMEOUT_SECOND
 # WebSocket handshake. JSONL: one {scope, message, repoOwner?, repoName?} per line.
 BOOT_WARNINGS_FILE_PATH = "/tmp/oi-boot-warnings.jsonl"
 
+# dockerd's own log, the only record of why the daemon failed to come up: the
+# supervisor starts it detached and does not wait for readiness, so nothing
+# else observes its stderr.
+DOCKERD_LOG_FILE_PATH = "/tmp/oi-dockerd.log"
+
+# Written by dockerd while it holds the daemon lock. Its presence means a daemon
+# is already running (or died without cleaning up), and starting a second one
+# just exits with "process with PID N is still running" — so the supervisor
+# treats it as a reason to stand down.
+DOCKERD_PID_FILE_PATH = "/var/run/docker.pid"
+
+# How long to let `docker info` answer when probing for an already-running
+# daemon. Only distinguishes "someone else started it" from "nobody has", so it
+# stays short: a slow-but-starting daemon is covered by the pid file above.
+DOCKER_INFO_PROBE_TIMEOUT_SECONDS = 5
+
 # Canonical repository manifest written by the supervisor before any child
 # process starts, rewritten on every boot. Consumed by the bridge (push
 # targeting) and the JS create-pull-request tool so the /workspace checkout

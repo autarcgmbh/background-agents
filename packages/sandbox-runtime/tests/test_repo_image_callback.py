@@ -9,6 +9,7 @@ from sandbox_runtime.repo_image_callback import (
     CALLBACK_TOKEN_ENV,
     CALLBACK_URL_ENV,
     CALLBACK_USER_AGENT,
+    ERROR_MESSAGE_MAX_CHARS,
     FAILURE_CALLBACK_URL_ENV,
     PROVIDER_SESSION_ID_ENV,
     RepoImageBuildCallback,
@@ -152,14 +153,69 @@ async def test_report_failure_posts_to_failed_endpoint_and_truncates_error(monke
         logger=MagicMock(),
     )
 
-    assert await reporter.report_failure("x" * 600)
+    assert await reporter.report_failure("x" * (ERROR_MESSAGE_MAX_CHARS + 100))
 
     assert str(requests[0].url) == "https://cp.test/repo-images/build-failed"
     assert json.loads(requests[0].content) == {
         "build_id": "build-1",
-        "error": "x" * 500,
+        "error": "x" * ERROR_MESSAGE_MAX_CHARS,
         "provider_session_id": "vercel-session-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_report_failure_appends_hook_output_tail(monkeypatch):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    _patch_async_client(monkeypatch, handler)
+    reporter = RepoImageBuildCallback(
+        build_id="build-1",
+        callback_url="https://cp.test/repo-images/build-complete",
+        failure_callback_url="https://cp.test/repo-images/build-failed",
+        token="callback-token",
+        provider_session_id="modal-session-1",
+        logger=MagicMock(),
+    )
+
+    assert await reporter.report_failure("setup hook failed", output_tail="line one\nline two")
+
+    assert json.loads(requests[0].content)["error"] == ("setup hook failed\n\nline one\nline two")
+
+
+@pytest.mark.asyncio
+async def test_report_failure_keeps_cause_and_trims_the_tail_when_over_budget(monkeypatch):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    _patch_async_client(monkeypatch, handler)
+    reporter = RepoImageBuildCallback(
+        build_id="build-1",
+        callback_url="https://cp.test/repo-images/build-complete",
+        failure_callback_url="https://cp.test/repo-images/build-failed",
+        token="callback-token",
+        provider_session_id="modal-session-1",
+        logger=MagicMock(),
+    )
+    cause = "setup hook failed"
+
+    assert await reporter.report_failure(
+        cause, output_tail="head" + ("y" * ERROR_MESSAGE_MAX_CHARS) + "the actual error"
+    )
+
+    error = json.loads(requests[0].content)["error"]
+    assert len(error) == ERROR_MESSAGE_MAX_CHARS
+    # The cause survives whole and the tail loses its oldest lines, so the
+    # reason the script stopped is still the last thing in the message.
+    assert error.startswith(f"{cause}\n\n")
+    assert error.endswith("the actual error")
+    assert "head" not in error
 
 
 @pytest.mark.asyncio

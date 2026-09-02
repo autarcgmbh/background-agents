@@ -31,6 +31,21 @@ _LOG_FORWARD_STREAM_LIMIT_BYTES = 1024 * 1024
 AGENT_TOOLS_GATED_ON_ENV = {"slack-notify.js": "AGENT_SLACK_NOTIFY_ENABLED"}
 AGENT_TOOLS_REQUIRING_REPOSITORY: set[str] = set()
 
+# Stripe's remote MCP takes either OAuth or a restricted API key as a bearer
+# token; only the latter works unattended. Repository secrets supply the key
+# under this name. See https://docs.stripe.com/mcp
+STRIPE_API_KEY_ENV_VAR = "STRIPE_API_KEY"
+STRIPE_MCP_URL = "https://mcp.stripe.com/"
+
+# Supabase's hosted MCP has the same two options, and the same one works
+# unattended: a personal access token sent as a bearer token. Repository secrets
+# supply it under the name the Supabase CLI already reads, so one secret
+# authenticates both. SUPABASE_MCP_URL is only needed when the repository
+# declares no Supabase server of its own. See
+# https://supabase.com/docs/guides/ai-tools/mcp#manual-authentication
+SUPABASE_ACCESS_TOKEN_ENV_VAR = "SUPABASE_ACCESS_TOKEN"
+SUPABASE_MCP_URL_ENV_VAR = "SUPABASE_MCP_URL"
+
 
 def resolve_opencode_global_config_dir() -> Path:
     """Resolve OpenCode's global config directory using its xdg-basedir rules."""
@@ -454,6 +469,59 @@ class OpenCodeServer:
         except Exception as e:
             self.log.warn("mcp.packages_install_error", packages=packages, exc=str(e))
 
+    def _stripe_mcp_overlay(self) -> dict[str, dict[str, Any]]:
+        """Authenticate Stripe's remote MCP with an API key instead of OAuth.
+
+        Nobody completes an OAuth consent flow inside a headless sandbox, so a
+        repository that declares the OAuth-based Stripe server gets a
+        `needs_auth` probe and no tools. When the key is present, override the
+        entry to send it as a bearer token. The value stays in the process
+        environment — OpenCode resolves the `{env:...}` placeholder itself, so
+        the secret never lands in OPENCODE_CONFIG_CONTENT.
+        """
+        if not os.environ.get(STRIPE_API_KEY_ENV_VAR):
+            return {}
+        return {
+            "stripe": {
+                "type": "remote",
+                "url": STRIPE_MCP_URL,
+                "oauth": False,
+                "headers": {"Authorization": f"Bearer {{env:{STRIPE_API_KEY_ENV_VAR}}}"},
+            }
+        }
+
+    def _supabase_mcp_overlay(self) -> dict[str, dict[str, Any]]:
+        """Authenticate Supabase's hosted MCP with a personal access token.
+
+        Same headless-OAuth problem as Stripe, from the other direction: the
+        repository declares the OAuth-based server so that a developer working
+        in a local clone authenticates as themselves, which leaves a sandbox
+        with a `needs_auth` probe and no tools. When the token is present,
+        override that entry's auth keys only.
+
+        `url` is deliberately left to the project config: the repository owns
+        the query parameters that decide what the server may do
+        (`project_ref`, `read_only`, `features`), and the deep merge keeps them
+        as long as nothing here sets `url`. SUPABASE_MCP_URL supplies a full URL
+        for sessions whose repository declares no Supabase server at all —
+        without either, the merged entry has no URL and OpenCode rejects it.
+
+        The token stays in the process environment — OpenCode resolves the
+        `{env:...}` placeholder itself, so the secret never lands in
+        OPENCODE_CONFIG_CONTENT.
+        """
+        if not os.environ.get(SUPABASE_ACCESS_TOKEN_ENV_VAR):
+            return {}
+        entry: dict[str, Any] = {
+            "type": "remote",
+            "oauth": False,
+            "headers": {"Authorization": f"Bearer {{env:{SUPABASE_ACCESS_TOKEN_ENV_VAR}}}"},
+        }
+        url = os.environ.get(SUPABASE_MCP_URL_ENV_VAR, "").strip()
+        if url:
+            entry["url"] = url
+        return {"supabase": entry}
+
     def _build_mcp_config(self, servers: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         """Convert MCP server list to OpenCode mcp config format."""
         config: dict[str, dict[str, Any]] = {}
@@ -490,12 +558,27 @@ class OpenCodeServer:
 
         # Inject MCP servers
         mcp_servers = self._resolve_mcp_servers()
+        mcp_config: dict[str, dict[str, Any]] = {}
         if mcp_servers:
             await self._install_mcp_packages(mcp_servers)
             mcp_config = self._build_mcp_config(mcp_servers)
-            if mcp_config:
-                opencode_config["mcp"] = mcp_config
-                self.log.info("mcp.configured", count=len(mcp_config))
+        # Overrides for repository-declared servers merge last: OPENCODE_CONFIG_CONTENT
+        # is deep-merged over the project config, so only the keys set here change.
+        stripe_overlay = self._stripe_mcp_overlay()
+        supabase_overlay = self._supabase_mcp_overlay()
+        for overlay in (stripe_overlay, supabase_overlay):
+            for name, entry in overlay.items():
+                # Per-key so an overlay that carries only auth keys keeps the
+                # url of a same-named server registered in the control plane.
+                mcp_config[name] = {**mcp_config.get(name, {}), **entry}
+        if mcp_config:
+            opencode_config["mcp"] = mcp_config
+            self.log.info(
+                "mcp.configured",
+                count=len(mcp_config),
+                stripe_api_key=bool(stripe_overlay),
+                supabase_access_token=bool(supabase_overlay),
+            )
 
         # Working directory: the repo for single-repo sessions, /workspace
         # for multi-repo (every member visible) and repo-less sessions.

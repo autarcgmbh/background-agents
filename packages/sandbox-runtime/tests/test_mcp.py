@@ -6,6 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sandbox_runtime.opencode_server import (
+    STRIPE_API_KEY_ENV_VAR,
+    STRIPE_MCP_URL,
+    SUPABASE_ACCESS_TOKEN_ENV_VAR,
+    SUPABASE_MCP_URL_ENV_VAR,
+)
 from tests.runtime_helpers import make_opencode_server
 
 
@@ -241,3 +247,67 @@ class TestNpmPackageRegex:
     )
     def test_rejects_dangerous_inputs(self, regex, pkg):
         assert not regex.match(pkg), f"Expected {pkg} to NOT match"
+
+
+class TestStripeMcpOverlay:
+    """STRIPE_API_KEY authenticates Stripe's remote MCP instead of OAuth."""
+
+    def test_overlay_is_empty_without_the_key(self, monkeypatch):
+        monkeypatch.delenv(STRIPE_API_KEY_ENV_VAR, raising=False)
+        assert _make_supervisor()._stripe_mcp_overlay() == {}
+
+    def test_overlay_disables_oauth_and_sends_bearer_header(self, monkeypatch):
+        monkeypatch.setenv(STRIPE_API_KEY_ENV_VAR, "rk_test_123")
+        overlay = _make_supervisor()._stripe_mcp_overlay()
+        assert overlay["stripe"]["type"] == "remote"
+        assert overlay["stripe"]["url"] == STRIPE_MCP_URL
+        assert overlay["stripe"]["oauth"] is False
+        assert overlay["stripe"]["headers"] == {
+            "Authorization": f"Bearer {{env:{STRIPE_API_KEY_ENV_VAR}}}"
+        }
+
+    def test_overlay_never_embeds_the_secret(self, monkeypatch):
+        """The key stays in the process env; only a placeholder is serialized."""
+        monkeypatch.setenv(STRIPE_API_KEY_ENV_VAR, "rk_test_secret_value")
+        assert "rk_test_secret_value" not in json.dumps(_make_supervisor()._stripe_mcp_overlay())
+
+
+class TestSupabaseMcpOverlay:
+    """SUPABASE_ACCESS_TOKEN authenticates Supabase's hosted MCP instead of OAuth."""
+
+    def test_overlay_is_empty_without_the_token(self, monkeypatch):
+        monkeypatch.delenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, raising=False)
+        assert _make_supervisor()._supabase_mcp_overlay() == {}
+
+    def test_overlay_disables_oauth_and_sends_bearer_header(self, monkeypatch):
+        monkeypatch.setenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, "sbp_test_123")
+        monkeypatch.delenv(SUPABASE_MCP_URL_ENV_VAR, raising=False)
+        overlay = _make_supervisor()._supabase_mcp_overlay()
+        assert overlay["supabase"]["type"] == "remote"
+        assert overlay["supabase"]["oauth"] is False
+        assert overlay["supabase"]["headers"] == {
+            "Authorization": f"Bearer {{env:{SUPABASE_ACCESS_TOKEN_ENV_VAR}}}"
+        }
+
+    def test_overlay_leaves_the_url_to_the_project_config(self, monkeypatch):
+        """Without SUPABASE_MCP_URL the repository keeps project_ref/read_only."""
+        monkeypatch.setenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, "sbp_test_123")
+        monkeypatch.delenv(SUPABASE_MCP_URL_ENV_VAR, raising=False)
+        assert "url" not in _make_supervisor()._supabase_mcp_overlay()["supabase"]
+
+    def test_overlay_uses_the_configured_url_when_set(self, monkeypatch):
+        url = "https://mcp.supabase.com/mcp?project_ref=abc123&read_only=true"
+        monkeypatch.setenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, "sbp_test_123")
+        monkeypatch.setenv(SUPABASE_MCP_URL_ENV_VAR, url)
+        assert _make_supervisor()._supabase_mcp_overlay()["supabase"]["url"] == url
+
+    def test_overlay_ignores_a_blank_url(self, monkeypatch):
+        monkeypatch.setenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, "sbp_test_123")
+        monkeypatch.setenv(SUPABASE_MCP_URL_ENV_VAR, "   ")
+        assert "url" not in _make_supervisor()._supabase_mcp_overlay()["supabase"]
+
+    def test_overlay_never_embeds_the_secret(self, monkeypatch):
+        """The token stays in the process env; only a placeholder is serialized."""
+        monkeypatch.setenv(SUPABASE_ACCESS_TOKEN_ENV_VAR, "sbp_secret_value")
+        overlay = _make_supervisor()._supabase_mcp_overlay()
+        assert "sbp_secret_value" not in json.dumps(overlay)

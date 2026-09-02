@@ -9,6 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from sandbox_runtime.repository_hooks import HookOutcome
 from sandbox_runtime.repository_sync import (
     RepositorySyncOutcome,
     RepositorySyncResult,
@@ -510,7 +511,10 @@ class TestImageBuildMode:
         supervisor.repository_boot.synchronizer.sync = AsyncMock(
             return_value=_successful_sync(supervisor.repository_boot)
         )
-        supervisor.repository_boot.hooks.run_setup = AsyncMock(return_value=False)
+
+        supervisor.repository_boot.hooks.run_setup = AsyncMock(
+            return_value=HookOutcome(succeeded=False, output_tail="docker: command not found")
+        )
         supervisor.shutdown = AsyncMock()
         supervisor._report_fatal_error = AsyncMock()
 
@@ -530,7 +534,8 @@ class TestImageBuildMode:
         assert build_succeeded is False
         callback.report_success.assert_not_called()
         callback.report_failure.assert_awaited_once_with(
-            "setup hook failed for acme/my-repo in build mode"
+            "setup hook failed for acme/my-repo in build mode",
+            output_tail="docker: command not found",
         )
 
     @pytest.mark.asyncio
@@ -563,7 +568,7 @@ class TestImageBuildMode:
 
         callback.report_success.assert_not_called()
         callback.report_failure.assert_awaited_once_with(
-            "image build exceeded its 1-second execution timeout"
+            "image build exceeded its 1-second execution timeout", output_tail=""
         )
 
     @pytest.mark.asyncio

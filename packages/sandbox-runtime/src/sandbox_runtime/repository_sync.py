@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -222,9 +223,14 @@ class RepositorySynchronizer:
         return True
 
     async def _fetch_branch(self, repo: RepoEntry, branch: str) -> bool:
+        started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             "git",
             "fetch",
+            # Nothing in the runtime resolves a tag — checkout is by branch — and
+            # a long-lived repository accumulates enough of them that negotiating
+            # and downloading them is pure boot latency.
+            "--no-tags",
             "origin",
             f"{branch}:refs/remotes/origin/{branch}",
             cwd=repo.path,
@@ -252,9 +258,16 @@ class RepositorySynchronizer:
                 exit_code=process.returncode,
             )
             return False
+        self.log.info(
+            "git.fetch_complete",
+            repo_owner=repo.owner,
+            repo_name=repo.name,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
         return True
 
     async def _checkout_branch(self, repo: RepoEntry, branch: str) -> bool:
+        started_at = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             "git",
             "checkout",
@@ -275,6 +288,12 @@ class RepositorySynchronizer:
                 target_branch=branch,
             )
             return False
+        self.log.info(
+            "git.checkout_complete",
+            repo_owner=repo.owner,
+            repo_name=repo.name,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
         return True
 
     async def _update_existing_repo(self, repo: RepoEntry, boot_mode: BootMode) -> bool:

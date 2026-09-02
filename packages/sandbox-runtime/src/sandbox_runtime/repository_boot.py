@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,14 @@ if TYPE_CHECKING:
     from .repository_hooks import RepositoryHooks
     from .repository_sync import RepositorySynchronizer
     from .tunnel_environment import TunnelEnvironment
+
+
+class SetupHookFailedError(RuntimeError):
+    """A setup hook failed during an image build, carrying its output tail."""
+
+    def __init__(self, message: str, output_tail: str = "") -> None:
+        super().__init__(message)
+        self.output_tail = output_tail
 
 
 @dataclass(frozen=True)
@@ -154,7 +163,9 @@ class RepositoryBoot:
         self._write_repo_manifest()
         if self.repositories:
             await self.synchronizer.ensure_credentials_configured()
+        sync_started_at = time.monotonic()
         sync_result = await self.synchronizer.sync(self.repositories, boot_mode)
+        sync_duration_ms = int((time.monotonic() - sync_started_at) * 1000)
         self.repositories = list(sync_result.repositories)
         git_sync_success = not sync_result.failures
         if sync_result.failures:
@@ -199,21 +210,32 @@ class RepositoryBoot:
                 }
                 for repo in self.repositories
             ]
-            head_sha = repository_shas[0]["baseSha"]
-            if head_sha:
-                self.log.info(
-                    "git.sync_complete", head_sha=head_sha, repository_shas=repository_shas
-                )
+        # One event for every boot mode: on a repo-image boot this is the only
+        # thing between dockerd and the start hook, and it was previously silent,
+        # so a slow sync looked like an unexplained gap in the timeline. The
+        # image builder additionally reads the SHAs off this line.
+        head_sha = repository_shas[0]["baseSha"] if repository_shas else ""
+        sync_fields: dict[str, Any] = {
+            "duration_ms": sync_duration_ms,
+            "repo_count": len(self.repositories),
+            "boot_mode": boot_mode.value,
+        }
+        if head_sha:
+            sync_fields["head_sha"] = head_sha
+            sync_fields["repository_shas"] = repository_shas
+        self.log.info("git.sync_complete", **sync_fields)
         setup_success: bool | None = None
         if self.repositories and boot_mode in (BootMode.FRESH, BootMode.BUILD):
             setup_success = True
             for repo in self.repositories:
-                if await self.hooks.run_setup(repo, boot_mode):
+                setup_outcome = await self.hooks.run_setup(repo, boot_mode)
+                if setup_outcome:
                     continue
                 setup_success = False
                 if boot_mode is BootMode.BUILD:
-                    raise RuntimeError(
-                        f"setup hook failed for {repo.owner}/{repo.name} in build mode"
+                    raise SetupHookFailedError(
+                        f"setup hook failed for {repo.owner}/{repo.name} in build mode",
+                        output_tail=getattr(setup_outcome, "output_tail", ""),
                     )
                 self.warnings.record(
                     "setup",

@@ -24,7 +24,7 @@ from src.sandbox.build_session import (
     BuildSessionNotFoundError,
     ModalBuildSessionService,
 )
-from src.sandbox.manager import SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS
+from src.sandbox.manager import MODAL_EXPERIMENTAL_OPTIONS, SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS
 from src.web_api import IMAGE_BUILD_FINALIZATION_GRACE_SECONDS
 
 
@@ -194,6 +194,7 @@ async def test_create_build_sandbox_runs_gated_entrypoint_and_scrubs_callback_en
         "sandbox_runtime.entrypoint",
         "--await-modal-image-build-token-stdin-v1",
     )
+    assert kwargs["experimental_options"] == MODAL_EXPERIMENTAL_OPTIONS
     assert kwargs["tags"] == {
         "openinspect_kind": "image-build",
         "openinspect_build_id": "build-1",

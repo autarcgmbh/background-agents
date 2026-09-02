@@ -1,9 +1,14 @@
-"""Tests for sandbox CPU/memory resource reservations in SandboxManager."""
+"""Tests for sandbox CPU/memory resource reservations."""
 
 from unittest.mock import AsyncMock
 
 import pytest
 
+from src.sandbox.build_session import (
+    BUILD_SANDBOX_CPU_CORES,
+    BUILD_SANDBOX_MEMORY_MIB,
+    ModalBuildSessionService,
+)
 from src.sandbox.manager import SandboxConfig, SandboxManager, _resource_kwargs
 
 
@@ -91,3 +96,30 @@ class TestCreateSandboxResources:
 
         assert captured["kwargs"]["cpu"] == 1.0
         assert captured["kwargs"]["memory"] == 2048
+
+
+class TestBuildSandboxResources:
+    """Image-build sandboxes reserve memory for the repository setup script."""
+
+    def test_build_memory_covers_monorepo_setup(self):
+        """A setup script that type-checks a large monorepo needs >= 12 GiB."""
+        assert BUILD_SANDBOX_MEMORY_MIB >= 12 * 1024
+
+    @pytest.mark.asyncio
+    async def test_create_requests_build_resources(self, monkeypatch):
+        captured: dict = {}
+        monkeypatch.setattr(
+            "src.sandbox.build_session.modal.Sandbox.create", _fake_create(captured)
+        )
+
+        await ModalBuildSessionService().create(
+            build_id="build-1",
+            scope_kind="repo",
+            scope_id="acme/repo",
+            repositories=[{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
+            callback_url="https://cp.test/image-builds/build-complete",
+            failure_callback_url="https://cp.test/image-builds/build-failed",
+        )
+
+        assert captured["kwargs"]["cpu"] == BUILD_SANDBOX_CPU_CORES
+        assert captured["kwargs"]["memory"] == BUILD_SANDBOX_MEMORY_MIB

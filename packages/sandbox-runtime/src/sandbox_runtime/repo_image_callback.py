@@ -15,7 +15,7 @@ CALLBACK_MAX_RETRIES = 3
 CALLBACK_BACKOFF_BASE_SECONDS = 2
 CALLBACK_TIMEOUT_SECONDS = 30.0
 CALLBACK_USER_AGENT = "open-inspect/repo-image-builder"
-ERROR_MESSAGE_MAX_CHARS = 500
+ERROR_MESSAGE_MAX_CHARS = 8000
 
 BUILD_ID_ENV = "OI_REPO_IMAGE_BUILD_ID"
 CALLBACK_URL_ENV = "OI_REPO_IMAGE_CALLBACK_URL"
@@ -117,11 +117,19 @@ class RepoImageBuildCallback:
         }
         return await self._post_with_retry(self.callback_url, payload)
 
-    async def report_failure(self, error: str) -> bool:
+    async def report_failure(self, error: str, output_tail: str = "") -> bool:
         """Report a failed repo-image build."""
+        cause = error[:ERROR_MESSAGE_MAX_CHARS]
+        separator = "\n\n"
+        tail_budget = ERROR_MESSAGE_MAX_CHARS - len(cause) - len(separator)
+        message = (
+            cause + separator + output_tail[-tail_budget:]
+            if output_tail and tail_budget > 0
+            else cause
+        )
         payload = {
             "build_id": self.build_id,
-            "error": error[-ERROR_MESSAGE_MAX_CHARS:],
+            "error": message,
             "provider_session_id": self.provider_session_id,
         }
         return await self._post_with_retry(self.failure_callback_url, payload)

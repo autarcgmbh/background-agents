@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .process_output import communicate_owned_subprocess, terminate_owned_subprocess
@@ -10,6 +11,19 @@ from .runtime_config import BootMode
 
 if TYPE_CHECKING:
     from .repo_config import RepoEntry
+
+HOOK_OUTPUT_TAIL_MAX_LINES = 50
+
+
+@dataclass(frozen=True)
+class HookOutcome:
+    """Whether a repository hook succeeded, plus its output if it did not."""
+
+    succeeded: bool
+    output_tail: str = ""
+
+    def __bool__(self) -> bool:
+        return self.succeeded
 
 
 class RepositoryHooks:
@@ -36,7 +50,7 @@ class RepositoryHooks:
         relative_script_path: str,
         timeout_env_var: str,
         default_timeout_seconds: int,
-    ) -> bool:
+    ) -> HookOutcome:
         script_path = repo.path / relative_script_path
         start_time = time.time()
         if not script_path.exists():
@@ -46,7 +60,7 @@ class RepositoryHooks:
                 path=str(script_path),
                 boot_mode=boot_mode.value,
             )
-            return True
+            return HookOutcome(succeeded=True)
         try:
             timeout_seconds = int(os.environ.get(timeout_env_var, str(default_timeout_seconds)))
         except ValueError:
@@ -79,6 +93,7 @@ class RepositoryHooks:
                 if process.returncode is None:
                     await self._terminate(process)
                 stdout = await process.stdout.read() if process.stdout else b""
+                output_tail = self._output_tail(stdout)
                 fields: dict[str, object] = {
                     "timeout_seconds": timeout_seconds,
                     "script": str(script_path),
@@ -86,12 +101,10 @@ class RepositoryHooks:
                     "boot_mode": boot_mode.value,
                 }
                 if boot_mode is not BootMode.BUILD:
-                    fields["output_tail"] = "\n".join(
-                        stdout.decode(errors="replace").splitlines()[-50:]
-                    )
+                    fields["output_tail"] = output_tail
                 self.log.error(f"{hook_name}.timeout", **fields)
-                return False
-            output_tail = "\n".join(stdout.decode(errors="replace").splitlines()[-50:])
+                return HookOutcome(succeeded=False, output_tail=output_tail)
+            output_tail = self._output_tail(stdout)
             fields = {
                 "exit_code": process.returncode,
                 "script": str(script_path),
@@ -100,11 +113,11 @@ class RepositoryHooks:
             }
             if process.returncode == 0:
                 self.log.info(f"{hook_name}.complete", **fields)
-                return True
+                return HookOutcome(succeeded=True)
             if boot_mode is not BootMode.BUILD:
                 fields["output_tail"] = output_tail
             self.log.error(f"{hook_name}.failed", **fields)
-            return False
+            return HookOutcome(succeeded=False, output_tail=output_tail)
         except Exception as error:
             self.log.error(
                 f"{hook_name}.error",
@@ -113,9 +126,14 @@ class RepositoryHooks:
                 duration_ms=int((time.time() - start_time) * 1000),
                 boot_mode=boot_mode.value,
             )
-            return False
+            return HookOutcome(succeeded=False)
 
-    async def run_setup(self, repo: RepoEntry, boot_mode: BootMode) -> bool:
+    @staticmethod
+    def _output_tail(stdout: bytes) -> str:
+        lines = stdout.decode(errors="replace").splitlines()
+        return "\n".join(lines[-HOOK_OUTPUT_TAIL_MAX_LINES:])
+
+    async def run_setup(self, repo: RepoEntry, boot_mode: BootMode) -> HookOutcome:
         return await self._run(
             repo,
             boot_mode,
@@ -125,7 +143,7 @@ class RepositoryHooks:
             default_timeout_seconds=self.DEFAULT_SETUP_TIMEOUT_SECONDS,
         )
 
-    async def run_start(self, repo: RepoEntry, boot_mode: BootMode) -> bool:
+    async def run_start(self, repo: RepoEntry, boot_mode: BootMode) -> HookOutcome:
         return await self._run(
             repo,
             boot_mode,

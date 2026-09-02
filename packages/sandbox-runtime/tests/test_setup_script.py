@@ -64,7 +64,7 @@ class TestSetupScriptSkip:
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.FRESH)
 
-        assert result is True
+        assert result.succeeded is True
         mock_exec.assert_not_called()
 
 
@@ -128,7 +128,7 @@ class TestSetupScriptFailure:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
 
     async def test_exception_returns_false(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
@@ -141,7 +141,7 @@ class TestSetupScriptFailure:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
 
     async def test_build_failure_log_omits_hook_output(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
@@ -154,11 +154,14 @@ class TestSetupScriptFailure:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.BUILD)
 
-        assert result is False
+        assert result.succeeded is False
         failure = sup.hooks.log.error.call_args
         assert failure.args == ("setup.failed",)
         assert failure.kwargs["exit_code"] == 1
         assert "output_tail" not in failure.kwargs
+        # Withheld from the provider's log stream, but still returned so the
+        # build-failed callback can carry it to the control plane.
+        assert result.output_tail == "secret from repository hook"
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +185,7 @@ class TestSetupScriptTimeout:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.FRESH)
 
-        assert result is False
+        assert result.succeeded is False
         fake_proc.kill.assert_called_once()
         fake_proc.wait.assert_awaited_once()
 
@@ -200,10 +203,11 @@ class TestSetupScriptTimeout:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.BUILD)
 
-        assert result is False
+        assert result.succeeded is False
         timeout = sup.hooks.log.error.call_args
         assert timeout.args == ("setup.timeout",)
         assert "output_tail" not in timeout.kwargs
+        assert result.output_tail == "secret partial output"
 
     async def test_default_timeout_300(self, tmp_path):
         sup = _make_repository_boot(tmp_path)
@@ -269,7 +273,7 @@ class TestSetupScriptTimeout:
         ):
             result = await sup.hooks.run_setup(sup.repositories[0], BootMode.FRESH)
 
-        assert result is True
+        assert result.succeeded is True
         assert captured_timeout["value"] == 300
 
 

@@ -42,6 +42,9 @@ from .vcs_env import inject_vcs_env_vars
 
 log = get_logger("manager")
 
+# Run every sandbox on Modal's VM runtime rather than the default gVisor one.
+MODAL_EXPERIMENTAL_OPTIONS: dict[str, Any] = {"vm_runtime": True}
+
 SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS = 300
 MAX_TUNNEL_PORTS = 10
 DEFAULT_VNC_ENABLED = False
@@ -453,6 +456,7 @@ class SandboxManager:
             "timeout": config.timeout_seconds,
             "workdir": "/workspace",
             "env": env_vars,
+            "experimental_options": MODAL_EXPERIMENTAL_OPTIONS,
             **_resource_kwargs(config.settings),
         }
         if exposed_ports:

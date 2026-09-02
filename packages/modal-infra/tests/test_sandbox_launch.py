@@ -14,7 +14,11 @@ from sandbox_runtime.constants import (
     VNC_PASSWORD_ENV_VAR,
 )
 from sandbox_runtime.types import SessionConfig
-from src.sandbox.manager import SandboxConfig, SandboxManager
+from src.sandbox.manager import (
+    MODAL_EXPERIMENTAL_OPTIONS,
+    SandboxConfig,
+    SandboxManager,
+)
 
 
 def _fake_create(captured: dict):
@@ -132,6 +136,7 @@ async def test_launch_matrix_preserves_common_and_source_specific_behavior(
     assert kwargs["cpu"] == 1.5
     assert kwargs["memory"] == 3072
     assert kwargs["encrypted_ports"] == [9000, 9001, 9002, 3000]
+    assert kwargs["experimental_options"] == MODAL_EXPERIMENTAL_OPTIONS
 
     assert env["CONTROL_PLANE_URL"] == "https://control.example"
     assert env["CUSTOM_ENV"] == "preserved"
