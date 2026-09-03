@@ -163,6 +163,9 @@ function GlobalSettingsSection({
   const [emitToolProgressActivities, setEmitToolProgressActivities] = useState(
     settings?.defaults?.emitToolProgressActivities ?? true
   );
+  const [setIssueDelegateOnStart, setSetIssueDelegateOnStart] = useState(
+    settings?.defaults?.setIssueDelegateOnStart ?? true
+  );
   const [issueSessionInstructions, setIssueSessionInstructions] = useState(
     settings?.defaults?.issueSessionInstructions ?? ""
   );
@@ -182,6 +185,7 @@ function GlobalSettingsSection({
         setAllowUserPreferenceOverride(settings.defaults?.allowUserPreferenceOverride ?? true);
         setAllowLabelModelOverride(settings.defaults?.allowLabelModelOverride ?? true);
         setEmitToolProgressActivities(settings.defaults?.emitToolProgressActivities ?? true);
+        setSetIssueDelegateOnStart(settings.defaults?.setIssueDelegateOnStart ?? true);
         setIssueSessionInstructions(settings.defaults?.issueSessionInstructions ?? "");
       }
       setInitialized(true);
@@ -234,6 +238,7 @@ function GlobalSettingsSection({
       allowUserPreferenceOverride,
       allowLabelModelOverride,
       emitToolProgressActivities,
+      setIssueDelegateOnStart,
     };
 
     if (model) defaults.model = model;
@@ -320,7 +325,7 @@ function GlobalSettingsSection({
         </label>
       </div>
 
-      <div className="mb-4">
+      <div className="grid sm:grid-cols-2 gap-2 mb-4">
         <label className="flex items-center justify-between px-3 py-2 border border-border rounded-sm cursor-pointer hover:bg-muted/50 transition text-sm">
           <span>Emit tool progress activities</span>
           <Checkbox
@@ -332,7 +337,22 @@ function GlobalSettingsSection({
             }}
           />
         </label>
+        <label className="flex items-center justify-between px-3 py-2 border border-border rounded-sm cursor-pointer hover:bg-muted/50 transition text-sm">
+          <span>Set agent as issue delegate</span>
+          <Checkbox
+            checked={setIssueDelegateOnStart}
+            onCheckedChange={(checked) => {
+              setSetIssueDelegateOnStart(!!checked);
+              setDirty(true);
+              setError("");
+            }}
+          />
+        </label>
       </div>
+      <p className="text-xs text-muted-foreground mb-4">
+        When a person starts work from Linear and the issue has no delegate, the agent sets itself
+        as delegate.
+      </p>
 
       <div className="mb-4">
         <label
@@ -553,6 +573,9 @@ function RepoOverrideRow({
   const [emitToolProgressActivities, setEmitToolProgressActivities] = useState(
     entry.settings.emitToolProgressActivities ?? true
   );
+  const [setIssueDelegateOnStart, setSetIssueDelegateOnStart] = useState(
+    entry.settings.setIssueDelegateOnStart ?? true
+  );
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
@@ -575,6 +598,7 @@ function RepoOverrideRow({
       allowUserPreferenceOverride,
       allowLabelModelOverride,
       emitToolProgressActivities,
+      setIssueDelegateOnStart,
     };
     if (model) settings.model = model;
     if (effort) settings.reasoningEffort = effort;
@@ -677,6 +701,19 @@ function RepoOverrideRow({
             checked={emitToolProgressActivities}
             onCheckedChange={(checked) => {
               setEmitToolProgressActivities(!!checked);
+              setDirty(true);
+            }}
+          />
+        </label>
+        <label
+          className="flex items-center justify-between px-2 py-1 text-sm border border-border rounded-sm"
+          title="When a person starts work from Linear and the issue has no delegate, the agent sets itself as delegate."
+        >
+          <span>Set agent as issue delegate</span>
+          <Checkbox
+            checked={setIssueDelegateOnStart}
+            onCheckedChange={(checked) => {
+              setSetIssueDelegateOnStart(!!checked);
               setDirty(true);
             }}
           />

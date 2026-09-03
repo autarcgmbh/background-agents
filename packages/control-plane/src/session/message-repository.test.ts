@@ -99,6 +99,35 @@ describe("MessageRepository", () => {
     });
   });
 
+  it("reads the processing message as a progress candidate and marks progress", () => {
+    const query = `SELECT id, source, callback_context, started_at, progress_notified_at, stop_confirmation_deadline
+       FROM messages WHERE status = 'processing' LIMIT 1`;
+    expect(repository.getProcessingProgressCandidate()).toBeNull();
+    mock.setData(query, [
+      {
+        id: "msg-1",
+        source: "linear",
+        callback_context: '{"source":"linear"}',
+        started_at: 1200,
+        progress_notified_at: null,
+        stop_confirmation_deadline: null,
+      },
+    ]);
+    expect(repository.getProcessingProgressCandidate()).toEqual({
+      id: "msg-1",
+      source: "linear",
+      callback_context: '{"source":"linear"}',
+      started_at: 1200,
+      progress_notified_at: null,
+      stop_confirmation_deadline: null,
+    });
+
+    repository.markProgressNotified("msg-1", 5000);
+    const update = mock.calls[mock.calls.length - 1];
+    expect(update.query).toContain("SET progress_notified_at = ?");
+    expect(update.params).toEqual([5000, "msg-1"]);
+  });
+
   it("tracks stop confirmation deadlines", () => {
     const query = `SELECT id, stop_confirmation_deadline FROM messages
        WHERE stop_confirmation_deadline IS NOT NULL LIMIT 1`;

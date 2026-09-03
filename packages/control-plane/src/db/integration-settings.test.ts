@@ -1120,6 +1120,7 @@ describe("IntegrationSettingsStore", () => {
           allowUserPreferenceOverride: true,
           allowLabelModelOverride: false,
           emitToolProgressActivities: false,
+          setIssueDelegateOnStart: false,
         },
       });
 
@@ -1132,8 +1133,17 @@ describe("IntegrationSettingsStore", () => {
           allowUserPreferenceOverride: true,
           allowLabelModelOverride: false,
           emitToolProgressActivities: false,
+          setIssueDelegateOnStart: false,
         },
       });
+    });
+
+    it("rejects a non-boolean setIssueDelegateOnStart", async () => {
+      await expect(
+        store.setRepoSettings("linear", "acme/platform", {
+          setIssueDelegateOnStart: "yes" as unknown as boolean,
+        })
+      ).rejects.toThrow("setIssueDelegateOnStart must be a boolean");
     });
 
     it("round-trips linear repo settings", async () => {

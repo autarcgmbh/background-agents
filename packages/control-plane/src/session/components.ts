@@ -77,6 +77,7 @@ import { ScmCredentialsService } from "./scm-credentials-service";
 import { ParticipantService } from "./participant-service";
 import { UserScmTokenStore } from "../db/user-scm-tokens";
 import { CallbackNotificationService } from "./callback-notification-service";
+import { createProgressKeepalive } from "./progress-keepalive";
 import { UserEnvResolver } from "./user-env-resolver";
 import { resolveSessionRepoId } from "./repo-id-resolution";
 import { Scheduler } from "../scheduler/scheduler";
@@ -341,12 +342,22 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
   const callbackService = new CallbackNotificationService({
     repository: sessionCoreRepository,
     messageRepository,
+    eventRepository,
     env,
     completeAutomationRun: scheduler
       ? (completion) => scheduler.runComplete(completion)
       : undefined,
     log,
     getSessionId: () => resolvePublicSessionId(sessionCoreRepository.getSession(), durableObjectId),
+  });
+  const progressKeepalive = createProgressKeepalive({
+    messageRepository,
+    eventRepository,
+    callbackService,
+    alarmScheduler,
+    backgroundTasks,
+    now: () => Date.now(),
+    log,
   });
 
   const statusService = new SessionStatusService(
@@ -413,7 +424,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     sessionIndexStore,
     scmProviderName,
     alarmScheduler,
-    getExecutionTimeoutMs
+    getExecutionTimeoutMs,
+    progressKeepalive
   );
 
   // Tier 7 — services over the queue and lifecycle.
@@ -444,7 +456,8 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     eventRepository,
     callbackService,
     messenger,
-    updateLastActivity
+    updateLastActivity,
+    progressKeepalive
   );
   const artifactEventHandler = new SandboxArtifactEventHandler(
     artifactRepository,
@@ -491,6 +504,7 @@ export function createSessionRuntime(platform: SessionPlatform, env: Env): Sessi
     repository: messageRepository,
     messageQueue,
     lifecycleManager,
+    progressKeepalive,
     alarmScheduler,
     getExecutionTimeoutMs,
     now: () => Date.now(),

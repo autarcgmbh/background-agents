@@ -11,13 +11,18 @@ import { computeHmacHex } from "@open-inspect/shared/auth";
 import {
   automationCallbackContextSchema,
   linearCompletionCallbackPayloadSchema,
+  linearProgressCallbackPayloadSchema,
   linearToolCallCallbackPayloadSchema,
+  MAX_LINEAR_TOOL_RESULT_CHARS,
+  type LinearProgressTrigger,
+  type LinearTerminationReason,
 } from "@open-inspect/shared/types/session-api";
 import { callbackSigningSecret, type CallbackDestination } from "../auth/service/callback-signing";
 import type { Logger } from "../logger";
 import { deliverWithRetry, retryDelivery } from "./callback-delivery";
 import { notifyLinearStarted } from "./linear-start-callback";
 import type { SessionRow } from "./types";
+import type { EventRepository } from "./event-repository";
 import type { MessageRepository } from "./message-repository";
 import type { FetchClient } from "../platform-ports";
 import type { AutomationRunCompletion } from "../scheduler/scheduler";
@@ -50,6 +55,7 @@ export type AutomationRunCompletionHandler = (completion: AutomationRunCompletio
 export interface CallbackServiceDeps {
   repository: CallbackRepository;
   messageRepository: MessageRepository;
+  eventRepository: Pick<EventRepository, "getMessageProgressSnapshot">;
   env: CallbackServiceEnv;
   log: Logger;
   getSessionId: () => string;
@@ -65,6 +71,24 @@ export interface CallbackServiceDeps {
  */
 const NOTIFIED_CALL_IDS_CAP = 500;
 const EMPTY_TOOL_ARGS: Record<string, unknown> = {};
+const TOOL_CALL_CALLBACK_THROTTLE_MS = 3_000;
+/** Tool-call statuses that carry the tool's output. */
+const TERMINAL_TOOL_CALL_STATUSES = new Set(["completed", "error"]);
+/** Progress is best-effort and periodic; the next heartbeat is the retry. */
+const PROGRESS_CALLBACK_ATTEMPTS = 1;
+
+/** How far a callId's lifecycle has been reported: its start, or its terminal status. */
+type NotifiedCallState = "started" | "finished";
+
+export interface NotifyCompleteOptions {
+  /** Why a Linear message ended unsuccessfully; omitted for real `execution_complete` events. */
+  terminationReason?: LinearTerminationReason;
+}
+
+export interface NotifyProgressInput {
+  trigger: LinearProgressTrigger;
+  elapsedMs: number;
+}
 
 interface CallbackDeliveryResult {
   delivered: boolean;
@@ -76,17 +100,19 @@ interface CallbackDeliveryResult {
 export class CallbackNotificationService {
   private readonly repository: CallbackRepository;
   private readonly messageRepository: MessageRepository;
+  private readonly eventRepository: Pick<EventRepository, "getMessageProgressSnapshot">;
   private readonly env: CallbackServiceEnv;
   private readonly log: Logger;
   private readonly getSessionId: () => string;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly completeAutomationRun: AutomationRunCompletionHandler | undefined;
   private _lastToolCallCallbackTs = 0;
-  private readonly notifiedCallIds = new Set<string>();
+  private readonly notifiedCallIds = new Map<string, NotifiedCallState>();
 
   constructor(deps: CallbackServiceDeps) {
     this.repository = deps.repository;
     this.messageRepository = deps.messageRepository;
+    this.eventRepository = deps.eventRepository;
     this.env = deps.env;
     this.log = deps.log;
     this.getSessionId = deps.getSessionId;
@@ -94,10 +120,10 @@ export class CallbackNotificationService {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
-  private markCallIdNotified(callId: string): void {
-    this.notifiedCallIds.add(callId);
+  private markCallIdNotified(callId: string, state: NotifiedCallState): void {
+    this.notifiedCallIds.set(callId, state);
     if (this.notifiedCallIds.size > NOTIFIED_CALL_IDS_CAP) {
-      const oldest = this.notifiedCallIds.values().next().value;
+      const oldest = this.notifiedCallIds.keys().next().value;
       if (oldest !== undefined) this.notifiedCallIds.delete(oldest);
     }
   }
@@ -170,10 +196,153 @@ export class CallbackNotificationService {
   }
 
   /**
+   * Best-effort, single-attempt progress callback for a running Linear message.
+   * Heartbeats keep the Linear agent session from going stale; step_finish
+   * surfaces a just-completed assistant text segment.
+   */
+  async notifyProgress(messageId: string, input: NotifyProgressInput): Promise<void> {
+    const message = this.messageRepository.getMessageCallbackContext(messageId);
+    if (!message?.callback_context || message.source !== "linear") {
+      this.log.debug("callback.progress", {
+        message_id: messageId,
+        trigger: input.trigger,
+        outcome: "skipped",
+        skip_reason: message?.callback_context ? "non_linear_source" : "no_callback_context",
+      });
+      return;
+    }
+
+    const { binding, secret } = this.resolveCallbackRoute("linear");
+    if (!secret) {
+      this.log.debug("callback.progress", {
+        message_id: messageId,
+        trigger: input.trigger,
+        outcome: "skipped",
+        skip_reason: "no_secret",
+      });
+      return;
+    }
+    if (!binding) {
+      this.log.debug("callback.progress", {
+        message_id: messageId,
+        trigger: input.trigger,
+        outcome: "skipped",
+        skip_reason: "no_binding",
+      });
+      return;
+    }
+
+    // Progress runs as a background task; the message may have completed since
+    // it was queued, and a completion callback is already on its way.
+    if (this.messageRepository.getMessageStatus(messageId) !== "processing") {
+      this.log.debug("callback.progress", {
+        message_id: messageId,
+        trigger: input.trigger,
+        outcome: "skipped",
+        skip_reason: "message_not_processing",
+      });
+      return;
+    }
+
+    const startedAt = Date.now();
+    const sessionId = this.getSessionId();
+    let result: CallbackDeliveryResult = {
+      delivered: false,
+      attempts: 0,
+      rejectReason: "unexpected_error",
+    };
+    let thrownError: unknown;
+
+    try {
+      const rawContext = JSON.parse(message.callback_context);
+      const snapshot = this.eventRepository.getMessageProgressSnapshot(messageId);
+      const callbackData = {
+        sessionId,
+        messageId,
+        timestamp: Date.now(),
+        elapsedMs: input.elapsedMs,
+        trigger: input.trigger,
+        toolCallCount: snapshot.toolCallCount,
+        phase: snapshot.phase,
+        ...(snapshot.currentTool ? { currentTool: snapshot.currentTool } : {}),
+        ...(snapshot.latestText !== undefined
+          ? {
+              latestText: snapshot.latestText,
+              latestTextComplete: input.trigger === "step_finish",
+            }
+          : {}),
+        context: rawContext,
+      };
+      const parsedCallback = linearProgressCallbackPayloadSchema.safeParse(callbackData);
+      if (!parsedCallback.success) {
+        result.rejectReason = "invalid_payload";
+        this.log.warn("callback.progress", {
+          message_id: messageId,
+          session_id: sessionId,
+          trigger: input.trigger,
+          outcome: "skipped",
+          skip_reason: "invalid_payload",
+        });
+        return;
+      }
+
+      const signature = await this.signPayload(parsedCallback.data, secret);
+      const payload = { ...parsedCallback.data, signature };
+      result = await deliverWithRetry(
+        (signal) =>
+          binding.fetch("https://internal/callbacks/progress", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal,
+          }),
+        this.sleep,
+        () => {
+          // The terminal `callback.progress_delivery` line carries the outcome.
+        },
+        { attempts: PROGRESS_CALLBACK_ATTEMPTS }
+      );
+    } catch (caught) {
+      thrownError = caught;
+    } finally {
+      const outcome =
+        thrownError !== undefined
+          ? "error"
+          : result.rejectReason
+            ? "rejected"
+            : result.delivered
+              ? "success"
+              : "error";
+      const fields = {
+        session_id: sessionId,
+        message_id: messageId,
+        trigger: input.trigger,
+        outcome,
+        duration_ms: Date.now() - startedAt,
+        attempts: result.attempts,
+        ...(result.httpStatus !== undefined ? { http_status: result.httpStatus } : {}),
+        ...(result.rejectReason && thrownError === undefined
+          ? { reject_reason: result.rejectReason }
+          : {}),
+        ...(thrownError !== undefined
+          ? { error: thrownError instanceof Error ? thrownError : new Error(String(thrownError)) }
+          : {}),
+      };
+      if (outcome === "success") this.log.info("callback.progress_delivery", fields);
+      else this.log.warn("callback.progress_delivery", fields);
+    }
+  }
+
+  /**
    * Best-effort notification of the originating client with retry.
    * Routes to the correct service binding based on the message source.
    */
-  async notifyComplete(messageId: string, success: boolean, error?: string): Promise<void> {
+  async notifyComplete(
+    messageId: string,
+    success: boolean,
+    error?: string,
+    options: NotifyCompleteOptions = {}
+  ): Promise<void> {
     const startedAt = Date.now();
     let sessionId: string | null = null;
     let source: string | null = null;
@@ -227,6 +396,9 @@ export class CallbackNotificationService {
         messageId,
         success,
         ...(error != null ? { error } : {}),
+        ...(source === "linear" && options.terminationReason !== undefined
+          ? { terminationReason: options.terminationReason }
+          : {}),
         timestamp,
         context: rawContext,
       };
@@ -352,7 +524,8 @@ export class CallbackNotificationService {
 
   /**
    * Notify the originating client of a tool_call event (best-effort, throttled).
-   * Max 1 callback per 3 seconds per session.
+   * Max 1 callback per TOOL_CALL_CALLBACK_THROTTLE_MS per session, except that a
+   * tool's terminal status may follow its own delivered start immediately.
    */
   async notifyToolCall(
     messageId: string,
@@ -363,16 +536,20 @@ export class CallbackNotificationService {
       callId?: string;
       call_id?: string;
       status?: string;
+      output?: string;
     }
   ): Promise<void> {
     const callId = event.callId ?? event.call_id ?? "";
+    const isTerminal = event.status !== undefined && TERMINAL_TOOL_CALL_STATUSES.has(event.status);
 
     // Dedup before throttle so a skipped duplicate doesn't burn the rate-limit
-    // window. Anthropic emits running+completed for the same callId; OpenAI's
-    // Responses API may emit only completed. Fire once per successfully
-    // delivered callId either way — failed deliveries do not mark the set, so
-    // a later event for the same callId can retry.
-    if (callId && this.notifiedCallIds.has(callId)) return;
+    // window. Each callId gets at most one start delivery and one terminal
+    // delivery: Anthropic emits running+completed for the same callId; OpenAI's
+    // Responses API may emit only completed. Failed deliveries do not advance
+    // the state, so a later event for the same callId can retry.
+    const notifiedState = callId ? this.notifiedCallIds.get(callId) : undefined;
+    if (notifiedState === "finished") return;
+    if (notifiedState === "started" && !isTerminal) return;
 
     // Use one timestamp for validation, throttling, and the callback payload.
     const now = Date.now();
@@ -428,12 +605,19 @@ export class CallbackNotificationService {
     const sessionId = this.getSessionId();
     const rawContext = JSON.parse(message.callback_context);
 
+    const output = isTerminal ? (event.output ?? "") : "";
     const callbackData = {
       sessionId,
       tool,
       args: source === "linear" ? event.args : (event.args ?? EMPTY_TOOL_ARGS),
       callId,
       status: event.status,
+      ...(output.length > 0
+        ? {
+            result: output.slice(0, MAX_LINEAR_TOOL_RESULT_CHARS),
+            resultTruncated: output.length > MAX_LINEAR_TOOL_RESULT_CHARS,
+          }
+        : {}),
       timestamp: now,
       context: rawContext,
     };
@@ -451,8 +635,13 @@ export class CallbackNotificationService {
       return;
     }
 
-    // Invalid callbacks must not consume the delivery throttle window.
-    if (now - this._lastToolCallCallbackTs < 3000) return;
+    // Invalid callbacks must not consume the delivery throttle window. A
+    // terminal status whose start was already delivered bypasses the throttle
+    // so the consumer's activity is never left open.
+    const bypassThrottle = isTerminal && notifiedState === "started";
+    if (!bypassThrottle && now - this._lastToolCallCallbackTs < TOOL_CALL_CALLBACK_THROTTLE_MS) {
+      return;
+    }
     this._lastToolCallCallbackTs = now;
 
     const payloadData = parsedPayload?.data ?? callbackData;
@@ -470,7 +659,7 @@ export class CallbackNotificationService {
         // Mark only on success so a transient failure doesn't dedupe the next
         // event for this callId (Anthropic's running and completed may be
         // seconds apart for long-running tools — the second event should retry).
-        if (callId) this.markCallIdNotified(callId);
+        if (callId) this.markCallIdNotified(callId, isTerminal ? "finished" : "started");
         this.log.info("callback.tool_call", {
           message_id: messageId,
           session_id: sessionId,

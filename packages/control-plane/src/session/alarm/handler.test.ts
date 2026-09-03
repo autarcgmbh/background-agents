@@ -17,6 +17,9 @@ function createHandler() {
   const lifecycleManager = {
     handleAlarm: vi.fn<() => Promise<SandboxAlarmResult>>().mockResolvedValue("no_action"),
   };
+  const progressKeepalive = {
+    tick: vi.fn<() => Promise<void>>().mockResolvedValue(),
+  };
   const alarmScheduler = {
     schedule: vi.fn<(timestamp: number) => Promise<void>>().mockResolvedValue(),
     cancel: vi.fn<() => Promise<void>>().mockResolvedValue(),
@@ -35,6 +38,7 @@ function createHandler() {
     repository: repository as unknown as MessageRepository,
     messageQueue,
     lifecycleManager,
+    progressKeepalive,
     alarmScheduler,
     getExecutionTimeoutMs: () => 1000,
     now,
@@ -46,6 +50,7 @@ function createHandler() {
     repository,
     messageQueue,
     lifecycleManager,
+    progressKeepalive,
     alarmScheduler,
     now,
     log,
@@ -126,6 +131,7 @@ describe("createAlarmHandler", () => {
       repository: repository as unknown as MessageRepository,
       messageQueue,
       lifecycleManager,
+      progressKeepalive: { tick: vi.fn<() => Promise<void>>().mockResolvedValue() },
       alarmScheduler,
       getExecutionTimeoutMs: () => 1000,
       now: () => 2000,
@@ -180,5 +186,33 @@ describe("createAlarmHandler", () => {
 
     expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledOnce();
     expect(messageQueue.resumeAfterSandboxTermination).toHaveBeenCalledOnce();
+  });
+
+  it("runs the progress keepalive tick after every other branch", async () => {
+    const { handler, repository, messageQueue, lifecycleManager, progressKeepalive } =
+      createHandler();
+    const order: string[] = [];
+    repository.getProcessingMessageWithStartedAt.mockReturnValue({
+      id: "message-1",
+      started_at: 500,
+    });
+    messageQueue.failStuckProcessingMessage.mockImplementation(async () => {
+      order.push("fail_stuck");
+    });
+    lifecycleManager.handleAlarm.mockImplementation(async () => {
+      order.push("lifecycle");
+      return "sandbox_terminated";
+    });
+    messageQueue.resumeAfterSandboxTermination.mockImplementation(async () => {
+      order.push("resume");
+    });
+    progressKeepalive.tick.mockImplementation(async () => {
+      order.push("keepalive");
+    });
+
+    await handler.handle();
+
+    expect(progressKeepalive.tick).toHaveBeenCalledOnce();
+    expect(order).toEqual(["fail_stuck", "lifecycle", "fail_stuck", "resume", "keepalive"]);
   });
 });

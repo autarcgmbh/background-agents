@@ -1,6 +1,10 @@
 import { toolCallIdentityKey } from "@open-inspect/shared/types/sandbox-events";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import {
+  MAX_LINEAR_PROGRESS_TEXT_CHARS,
+  type LinearProgressPhase,
+} from "@open-inspect/shared/types/session-api";
+import {
   eventTimelineCursorFromRow,
   type EventListCursor,
   type EventTimelineCursor,
@@ -48,6 +52,28 @@ export interface EventPage {
 
 interface QueryEventPageOptions extends ListEventPageOptions {
   excludeTypes?: string[];
+}
+
+/** What a running message looks like right now, for Linear progress callbacks. */
+export interface MessageProgressSnapshot {
+  toolCallCount: number;
+  currentTool?: { tool: string; callId: string; status?: string };
+  phase: LinearProgressPhase;
+  /** Tail of the latest assistant text, capped at MAX_LINEAR_PROGRESS_TEXT_CHARS. */
+  latestText?: string;
+}
+
+const ACTIVE_TOOL_CALL_STATUSES = new Set(["pending", "running"]);
+
+function parseEventData(data: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(data);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Persistence for events scoped to one session. */
@@ -128,6 +154,69 @@ export class EventRepository {
     createdAt: number
   ): void {
     this.upsertEventByMessageId("execution_complete", messageId, event, createdAt);
+  }
+
+  /**
+   * Phase heuristic: an unfinished tool call wins; otherwise text that arrived
+   * after the newest tool call means the model is responding; otherwise it is
+   * still thinking. Tool-call rows keep their first-seen `created_at`, and the
+   * token row is re-stamped on every upsert, so the comparison is between the
+   * newest tool start and the latest text activity.
+   */
+  getMessageProgressSnapshot(messageId: string): MessageProgressSnapshot {
+    const toolCalls = this.sql
+      .exec(
+        `SELECT data, created_at FROM events
+         WHERE type = 'tool_call' AND message_id = ?
+         ORDER BY created_at DESC, timeline_sequence DESC`,
+        messageId
+      )
+      .toArray() as Array<{ data: string; created_at: number }>;
+    const tokenRow = (
+      this.sql
+        .exec(`SELECT data, created_at FROM events WHERE id = ?`, `token:${messageId}`)
+        .toArray() as Array<{ data: string; created_at: number }>
+    )[0];
+
+    const parsedToolCalls = toolCalls.map((row) => ({
+      createdAt: row.created_at,
+      event: parseEventData(row.data),
+    }));
+    const activeToolCall = parsedToolCalls.find(
+      ({ event }) =>
+        typeof event?.status === "string" && ACTIVE_TOOL_CALL_STATUSES.has(event.status)
+    );
+    const tokenContent = parseEventData(tokenRow?.data ?? "")?.content;
+    const text = typeof tokenContent === "string" ? tokenContent : "";
+    const latestText = text.length > 0 ? text.slice(-MAX_LINEAR_PROGRESS_TEXT_CHARS) : undefined;
+
+    let phase: LinearProgressPhase = "thinking";
+    if (activeToolCall) {
+      phase = "tool_call";
+    } else if (
+      tokenRow &&
+      latestText !== undefined &&
+      (parsedToolCalls.length === 0 || tokenRow.created_at > parsedToolCalls[0].createdAt)
+    ) {
+      phase = "responding";
+    }
+
+    const activeEvent = activeToolCall?.event;
+    const currentTool =
+      activeEvent && typeof activeEvent.tool === "string" && typeof activeEvent.callId === "string"
+        ? {
+            tool: activeEvent.tool,
+            callId: activeEvent.callId,
+            ...(typeof activeEvent.status === "string" ? { status: activeEvent.status } : {}),
+          }
+        : undefined;
+
+    return {
+      toolCallCount: toolCalls.length,
+      ...(currentTool ? { currentTool } : {}),
+      phase,
+      ...(latestText !== undefined ? { latestText } : {}),
+    };
   }
 
   listEventPage(options: ListEventPageOptions): EventPage {

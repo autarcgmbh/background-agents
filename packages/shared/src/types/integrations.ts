@@ -111,6 +111,8 @@ export const linearBotSettingsSchema = z.strictObject({
   allowUserPreferenceOverride: z.boolean().optional(),
   allowLabelModelOverride: z.boolean().optional(),
   emitToolProgressActivities: z.boolean().optional(),
+  /** Set the agent as the issue delegate when a human starts implementation work. */
+  setIssueDelegateOnStart: z.boolean().optional(),
   issueSessionInstructions: z.string().optional(),
 });
 
