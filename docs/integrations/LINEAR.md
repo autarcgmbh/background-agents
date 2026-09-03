@@ -73,8 +73,12 @@ session was stopped or cancelled, a new Linear Agent request may start a new Ope
 
 ### Stop or Cancel
 
-Stopping or cancelling the Linear Agent session stops the associated Open-Inspect sandbox session
-and clears the issue's session mapping.
+Use Linear's **Send stop request** on the agent session. Open-Inspect stops the sandbox session,
+clears the issue's session mapping, and confirms with a final activity ("Stopped the coding session
+for …", or "Nothing was running" when the request arrived before a session existed). A stop that
+arrives while Open-Inspect is still choosing a repository or creating the session aborts that start.
+
+Unassigning the agent from the issue also stops the session and posts the same confirmation.
 
 ---
 
@@ -90,8 +94,8 @@ or trigger comment:
 Please handle this in acme/billing-api.
 ```
 
-If Open-Inspect asks for clarification, reply with `owner/repo`. That answer is used on the next
-resolution attempt.
+If Open-Inspect asks for clarification, pick one of the repository options it shows, or reply with
+`owner/repo`. That answer is used on the next resolution attempt.
 
 Admins can map Linear projects or teams to repositories. See
 [Configure Repo Mapping](../../packages/linear-bot/README.md#4-configure-repo-mapping-optional) for
@@ -104,13 +108,16 @@ starts.
 
 ## What Linear Shows
 
-| Activity            | What it means                                              |
-| ------------------- | ---------------------------------------------------------- |
-| Thinking            | Open-Inspect is analyzing the issue or choosing a repo     |
-| Working             | A session has started                                      |
-| Tool progress       | Optional updates for file reads, edits, and commands       |
-| Clarification       | Open-Inspect needs more information, usually the repo name |
-| Completion or error | The session finished, failed, or could not continue        |
+| Activity            | What it means                                                                  |
+| ------------------- | ------------------------------------------------------------------------------ |
+| Thinking            | Open-Inspect is analyzing the issue or choosing a repo                         |
+| Working             | A session has started                                                          |
+| Agent messages      | What the agent said between steps, as it works                                 |
+| Tool progress       | Optional updates for file reads, edits, and commands, with results             |
+| Still working       | A keepalive during long silent steps; the session is not stale                 |
+| Clarification       | Open-Inspect needs more information, usually the repo name                     |
+| Stopped             | A stop request or unassignment was honoured                                    |
+| Completion or error | The session finished (with the agent's summary), failed, or could not continue |
 
 When a session starts, Linear receives a **View Session** link. If the agent opens a pull request,
 Linear receives a **Pull Request** link when the session finishes.
@@ -121,8 +128,10 @@ state only after the initial prompt reaches a live sandbox. It leaves automation
 already-started, completed, and canceled issues unchanged. Follow-up prompts do not change issue
 status.
 
-Open-Inspect does not update labels, assignee, priority, or project. Pull-request workflow changes
-remain the responsibility of Linear's GitHub integration and the team's PR automation settings.
+When a person starts the work and the issue has no delegate, Open-Inspect sets itself as the
+delegate (configurable). It does not update labels, assignee, priority, or project. Pull-request
+workflow changes remain the responsibility of Linear's GitHub integration and the team's PR
+automation settings.
 
 ---
 
@@ -138,6 +147,7 @@ Open the web app and go to **Settings > Integrations > Linear** to configure the
 | Allow user model preferences   | Whether admin-managed user preferences can override the model     |
 | Allow model labels (`model:*`) | Whether Linear issue labels can choose the model                  |
 | Tool progress activities       | Whether Linear shows intermediate file and command activity       |
+| Set agent as issue delegate    | Whether the agent becomes the delegate when a person starts work  |
 | Repository Overrides           | Per-repository defaults for model, reasoning, and Linear behavior |
 
 If no Linear settings are configured, all accessible repositories are in scope, user preferences and
@@ -224,6 +234,18 @@ start a new Agent session if the issue mapping has expired.
 Deploy the replacement `LINEAR_CLIENT_SECRET` promptly. Linear invalidates tokens minted with the
 old secret; the Worker replaces the cached token after a cache miss, expiry, or HTTP 401 and retries
 the rejected API request once. A reinstall is not normally required.
+
+### Linear shows the session as stale
+
+The control plane sends a progress callback every few minutes while a session runs, and the bot
+answers with a keepalive thought. If a session still goes stale, check the linear-bot logs for
+`callback.progress` (outcome `emitted` vs `throttled`/`no_oauth_token`) and the control-plane logs
+for `callback.progress_delivery`.
+
+### The agent replied that it can only work on issues
+
+Agent sessions started from a project or document have no issue to work on. Mention or delegate the
+agent from an issue instead.
 
 ### The wrong model was used
 

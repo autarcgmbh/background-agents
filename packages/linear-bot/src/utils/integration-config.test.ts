@@ -84,6 +84,7 @@ describe("getLinearConfig", () => {
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: true,
       emitToolProgressActivities: true,
+      setIssueDelegateOnStart: true,
       issueSessionInstructions: null,
       enabledRepos: null,
     });
@@ -106,6 +107,7 @@ describe("getLinearConfig", () => {
       allowUserPreferenceOverride: true,
       allowLabelModelOverride: true,
       emitToolProgressActivities: true,
+      setIssueDelegateOnStart: true,
       issueSessionInstructions: null,
       enabledRepos: null,
     });

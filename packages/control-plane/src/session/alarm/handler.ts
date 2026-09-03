@@ -4,6 +4,7 @@ import type { SandboxLifecycleManager } from "../../sandbox/lifecycle/manager";
 import type { AlarmScheduler } from "../../platform-ports";
 import type { SessionMessageQueue } from "../message-queue";
 import type { MessageRepository } from "../message-repository";
+import type { ProgressKeepalive } from "../progress-keepalive";
 
 export interface AlarmHandlerDeps {
   repository: MessageRepository;
@@ -14,6 +15,7 @@ export interface AlarmHandlerDeps {
     | "resumeAfterSandboxTermination"
   >;
   lifecycleManager: Pick<SandboxLifecycleManager, "handleAlarm">;
+  progressKeepalive: Pick<ProgressKeepalive, "tick">;
   alarmScheduler: AlarmScheduler;
   /** Resolved per use so it honors settings persisted after construction. */
   getExecutionTimeoutMs: () => number;
@@ -30,7 +32,9 @@ export interface AlarmHandler {
  * Durable Object alarm handler.
  *
  * Checks for stuck processing messages (defense-in-depth execution timeout)
- * before delegating to lifecycle alarm processing.
+ * before delegating to lifecycle alarm processing. The Linear progress
+ * keepalive runs last so a message the earlier branches just failed is never
+ * reported as still making progress.
  */
 export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
   return {
@@ -72,6 +76,7 @@ export function createAlarmHandler(deps: AlarmHandlerDeps): AlarmHandler {
       if (lifecycleResult === "sandbox_terminated") {
         await deps.messageQueue.resumeAfterSandboxTermination();
       }
+      await deps.progressKeepalive.tick();
     },
   };
 }

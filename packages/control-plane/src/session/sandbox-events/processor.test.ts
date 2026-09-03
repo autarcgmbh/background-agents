@@ -80,6 +80,7 @@ function createProcessor() {
   const processMessageQueue = vi.fn(async () => {});
   const broadcastPromptQueue = vi.fn();
   const updateLastActivity = vi.fn();
+  const progressKeepalive = { onStepFinish: vi.fn() };
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
   const log = {
     debug: vi.fn(),
@@ -103,7 +104,8 @@ function createProcessor() {
       eventRepository,
       callbackService as unknown as CallbackNotificationService,
       messenger,
-      updateLastActivity
+      updateLastActivity,
+      progressKeepalive
     ),
     new SandboxArtifactEventHandler(
       artifactRepository,
@@ -154,6 +156,7 @@ function createProcessor() {
     processMessageQueue,
     broadcastPromptQueue,
     updateLastActivity,
+    progressKeepalive,
     applySessionTitleUpdate,
     backgroundTasks,
     log,
@@ -406,6 +409,39 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.repository.addSessionCost).toHaveBeenCalledWith(0.0123, expect.any(Number));
     expect(h.eventRepository.createEvent).not.toHaveBeenCalled();
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
+  });
+
+  it("forwards step_finish to the progress keepalive with the resolved message", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "step_finish",
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+      reason: "tool-calls",
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.progressKeepalive.onStepFinish).toHaveBeenCalledWith(
+      "msg-1",
+      "tool-calls",
+      expect.any(Number)
+    );
+  });
+
+  it("does not forward step_start to the progress keepalive", async () => {
+    const h = createProcessor();
+    const event: SandboxEvent = {
+      type: "step_start",
+      messageId: "msg-1",
+      sandboxId: "sb-1",
+      timestamp: 1000,
+    };
+
+    await h.processor.processSandboxEvent(event);
+
+    expect(h.progressKeepalive.onStepFinish).not.toHaveBeenCalled();
   });
 
   it("does not add session cost for step_finish with NaN cost", async () => {

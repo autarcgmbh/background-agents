@@ -27,9 +27,47 @@ export function createFakeKV(initial: Record<string, string> = {}) {
     delete: vi.fn(async (key: string) => {
       store.delete(key);
     }),
+    list: vi.fn(async (options?: { prefix?: string; limit?: number }) => {
+      const prefix = options?.prefix ?? "";
+      const keys = Array.from(store.keys())
+        .filter((name) => name.startsWith(prefix))
+        .slice(0, options?.limit ?? 1000)
+        .map((name) => ({ name }));
+      return { keys, list_complete: true, cacheStatus: null };
+    }),
   };
 
   return { kv: kv as unknown as KVNamespace, store, putCalls };
+}
+
+/** Lifetime of the cached runtime token produced by {@link storedClientCredentialsToken}. */
+export const STORED_TOKEN_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * A cached Linear client-credentials token as `LINEAR_KV` stores it under
+ * `oauth:client-credentials:<orgId>`; seeding it lets a handler obtain a Linear
+ * client without touching the OAuth endpoint.
+ */
+export function storedClientCredentialsToken(
+  overrides: Partial<{
+    access_token: string;
+    organization_id: string;
+    app_user_id: string;
+  }> = {}
+): string {
+  const issuedAt = Date.now();
+  return JSON.stringify({
+    version: 1,
+    access_token: "valid-token",
+    token_type: "Bearer",
+    scope: "read,write,app:assignable,app:mentionable",
+    issued_at: issuedAt,
+    expires_at: issuedAt + STORED_TOKEN_TTL_MS,
+    organization_id: "org-1",
+    organization_name: "Acme",
+    app_user_id: "app-user-1",
+    ...overrides,
+  });
 }
 
 export function makeLinearBotEnv(kv: KVNamespace, overrides: Partial<Env> = {}): Env {

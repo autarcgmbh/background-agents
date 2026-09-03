@@ -18,10 +18,12 @@ import {
 } from "./utils/linear-client";
 import { extractAgentResponse, formatAgentResponse } from "./completion/extractor";
 import { resolveAppName } from "@open-inspect/shared/app-name";
-import { makePlan } from "./plan";
+import { cancelPlanFrom, makePlan } from "./plan";
 import { createLogger } from "./logger";
 import { createStartCallbackRouter } from "./callbacks/start-callback";
+import { createProgressCallbackRouter } from "./callbacks/progress-callback";
 import { rejectInvalidCallback } from "./callbacks/reject-invalid-callback";
+import { markMessageCompleted, touchKeepalive } from "./kv-store";
 
 const log = createLogger("callback");
 
@@ -37,6 +39,7 @@ export function formatCompletionComment(
 
 export const callbacksRouter = new Hono<{ Bindings: Env }>();
 callbacksRouter.route("/", createStartCallbackRouter());
+callbacksRouter.route("/", createProgressCallbackRouter());
 
 callbacksRouter.post("/complete", async (c) => {
   const startTime = Date.now();
@@ -82,30 +85,54 @@ callbacksRouter.post("/complete", async (c) => {
  * `parameter` fields (not `body`). The `action` is the verb shown in the UI,
  * the `parameter` is the operand. Both fields must be present and non-empty.
  */
+/** Cap on the tool result shown inline in Linear's ephemeral action row. */
+export const TOOL_RESULT_MAX_CHARS = 300;
+
+/** Fenced, truncated rendering of a tool's output for an `action.result`. */
+export function formatToolResult(output: string | undefined): string | undefined {
+  const trimmed = output?.trim();
+  if (!trimmed) return undefined;
+  const clipped =
+    trimmed.length > TOOL_RESULT_MAX_CHARS
+      ? `${trimmed.slice(0, TOOL_RESULT_MAX_CHARS - 1)}…`
+      : trimmed;
+  return `\`\`\`\n${clipped}\n\`\`\``;
+}
+
 export function formatToolAction(
   tool: string,
-  args: Record<string, unknown>
-): { action: string; parameter: string } {
+  args: Record<string, unknown>,
+  output?: string
+): { action: string; parameter: string; result?: string } {
+  const result = formatToolResult(output);
+  const withResult = (base: { action: string; parameter: string }) =>
+    result ? { ...base, result } : base;
   switch (tool) {
     case "edit_file":
     case "write_file":
-      return { action: "Edit", parameter: String(args.filepath || args.path || "file") };
+      return withResult({
+        action: "Edit",
+        parameter: String(args.filepath || args.path || "file"),
+      });
     case "read_file":
-      return { action: "Read", parameter: String(args.filepath || args.path || "file") };
+      return withResult({
+        action: "Read",
+        parameter: String(args.filepath || args.path || "file"),
+      });
     case "bash":
     case "execute_command": {
       const cmd = String(args.command || args.cmd || "");
-      return {
+      return withResult({
         action: "Run",
         parameter: cmd.length > 80 ? cmd.slice(0, 77) + "..." : cmd || "(no command)",
-      };
+      });
     }
     default: {
       const firstStringArg = Object.values(args).find((v) => typeof v === "string");
-      return {
+      return withResult({
         action: tool,
         parameter: firstStringArg ? String(firstStringArg).slice(0, 200) : "(no args)",
-      };
+      });
     }
   }
 }
@@ -190,13 +217,18 @@ callbacksRouter.post("/tool_call", async (c) => {
       }
 
       try {
-        const { action, parameter } = formatToolAction(payload.tool, payload.args);
-        await emitAgentActivity(
+        const { action, parameter, result } = formatToolAction(
+          payload.tool,
+          payload.args,
+          payload.result
+        );
+        const delivered = await emitAgentActivity(
           client,
           context.agentSessionId,
-          { type: "action", action, parameter },
-          true
+          { type: "action", action, parameter, ...(result ? { result } : {}) },
+          { ephemeral: true }
         );
+        if (delivered) await touchKeepalive(c.env, context.agentSessionId);
         log.info("callback.tool_call", {
           trace_id: traceId,
           session_id: payload.sessionId,
@@ -224,6 +256,17 @@ callbacksRouter.post("/tool_call", async (c) => {
 
 // ─── Completion Callback ─────────────────────────────────────────────────────
 
+/** Error text the control plane uses for stopped runs before `terminationReason` existed. */
+const LEGACY_STOPPED_ERROR = "Execution was stopped";
+
+export function isUserInitiatedTermination(payload: LinearCompletionCallback): boolean {
+  if (payload.success) return false;
+  if (payload.terminationReason) {
+    return payload.terminationReason === "stopped" || payload.terminationReason === "cancelled";
+  }
+  return payload.error === LEGACY_STOPPED_ERROR;
+}
+
 async function handleCompletionCallback(
   payload: LinearCompletionCallback,
   env: Env,
@@ -233,6 +276,33 @@ async function handleCompletionCallback(
   const { sessionId, context } = payload;
 
   try {
+    // Late progress callbacks for this message must not reopen the session.
+    await markMessageCompleted(env, sessionId, payload.messageId);
+
+    // A stop or cancel was requested from Linear; the stop handler already
+    // confirmed it, so a second (error) activity would only add noise.
+    if (isUserInitiatedTermination(payload)) {
+      if (context.agentSessionId && context.organizationId && context.appUserId) {
+        const client = await getLinearClient(env, context.organizationId, context.appUserId);
+        if (client) {
+          await updateAgentSession(client, context.agentSessionId, {
+            plan: cancelPlanFrom("session_created"),
+          });
+        }
+      }
+      log.info("callback.complete", {
+        trace_id: traceId,
+        session_id: sessionId,
+        issue_id: context.issueId,
+        agent_session_id: context.agentSessionId,
+        outcome: "skipped",
+        skip_reason: "user_initiated_termination",
+        termination_reason: payload.terminationReason,
+        duration_ms: Date.now() - startTime,
+      });
+      return;
+    }
+
     // Extract rich agent response from events
     const agentResponse = await extractAgentResponse(env, sessionId, payload.messageId, traceId);
 

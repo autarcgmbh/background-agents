@@ -16,7 +16,9 @@ import {
   linearClientCredentialsResponse,
   linearIdentityResponse,
   makeLinearBotEnv,
+  storedClientCredentialsToken,
 } from "./test-helpers";
+import { cancelPlanFrom, makePlan } from "./plan";
 
 describe("escapeHtml", () => {
   it("escapes & to &amp;", () => {
@@ -528,7 +530,7 @@ describe("handleAgentSessionEvent environment targets", () => {
     );
   });
 
-  it("omits actor identity and issue transition for an automation-created session", async () => {
+  it("acts as the installed app user and skips the issue transition for an automation-created session", async () => {
     const { kv } = createFakeKV({
       "oauth:client-credentials:org-1": validToken(),
       "config:project-repos": JSON.stringify({
@@ -542,7 +544,20 @@ describe("handleAgentSessionEvent environment targets", () => {
 
     await handleAgentSessionEvent(webhook, env, "trace-automation");
 
+    // No human identity is attached to the session...
     expect(createSessionBody(fetchMock)).not.toHaveProperty("actorUserId");
+    expect(createSessionBody(fetchMock)).not.toHaveProperty("actorDisplayName");
+    // ...but the control plane still receives an actor (the app user) for create and prompt.
+    const createCall = fetchMock.mock.calls.find(
+      ([input]) => String(input) === "https://internal/sessions"
+    );
+    const promptCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/prompt"));
+    expect(new Headers(createCall?.[1]?.headers).get("X-OpenInspect-Actor")).toBe(
+      "linear:app-user-1"
+    );
+    expect(new Headers(promptCall?.[1]?.headers).get("X-OpenInspect-Actor")).toBe(
+      "linear:app-user-1"
+    );
     expect(promptBody(fetchMock)).toMatchObject({
       callbackContext: { transitionIssueOnStart: false },
     });
@@ -1119,5 +1134,1073 @@ describe("handleAgentSessionEvent auth failures", () => {
         auth_failure_reason: "client_credentials_invalid_client",
       })
     );
+  });
+});
+
+// ─── Agent-spec flows: stop markers, ack ordering, elicitation, delegate, history ──
+
+describe("handleAgentSessionEvent agent-spec flows", () => {
+  const GRAPHQL_URL = "https://api.linear.app/graphql";
+  const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+
+  interface LinearCall {
+    operationName: string;
+    variables: Record<string, unknown>;
+  }
+
+  type GraphQLOps = Record<string, (variables: Record<string, unknown>) => unknown>;
+  type Route = (init: RequestInit) => Response | Promise<Response>;
+
+  function readOperationName(query: unknown): string {
+    return typeof query === "string" ? (/\b(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "") : "";
+  }
+
+  function linearCalls(): LinearCall[] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([input]) => String(input) === GRAPHQL_URL)
+      .map(([, init]) => {
+        const body = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        return { operationName: readOperationName(body.query), variables: body.variables };
+      });
+  }
+
+  function activities(): Array<{
+    content: { type: string; body?: string };
+    ephemeral?: boolean;
+    signal?: string;
+    signalMetadata?: { options: Array<{ value: string }> };
+  }> {
+    return linearCalls()
+      .filter((call) => call.operationName === "AgentActivityCreate")
+      .map((call) => call.variables.input as ReturnType<typeof activities>[number]);
+  }
+
+  function sessionUpdates(): Array<Record<string, unknown>> {
+    return linearCalls()
+      .filter((call) => call.operationName === "AgentSessionUpdate")
+      .map((call) => call.variables.input as Record<string, unknown>);
+  }
+
+  function stubLinear(ops: GraphQLOps = {}, anthropic?: () => unknown) {
+    const linear = createLinearFetchMock({
+      clientCredentials: () => linearClientCredentialsResponse(),
+      identity: () => linearIdentityResponse(),
+      graphql: ({ operationName, body }) => {
+        const op = operationName ? ops[operationName] : undefined;
+        return Response.json(
+          op ? op((body.variables ?? {}) as Record<string, unknown>) : { data: {} }
+        );
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === ANTHROPIC_URL && anthropic) return Response.json(anthropic());
+      return linear(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  function cp(env: Env): Mock {
+    return (env.CONTROL_PLANE as unknown as { fetch: Mock }).fetch;
+  }
+
+  function stubControlPlane(env: Env, routes: Record<string, Route>): Mock {
+    const fetchMock = cp(env);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const route =
+        routes[url] ??
+        Object.entries(routes).find(
+          ([pattern]) => pattern.endsWith("*") && url.startsWith(pattern.slice(0, -1))
+        )?.[1];
+      if (!route) throw new Error(`Unexpected control-plane fetch to ${url}`);
+      return route(init ?? {});
+    });
+    return fetchMock;
+  }
+
+  function cpUrls(env: Env): string[] {
+    return cp(env).mock.calls.map(([input]) => String(input));
+  }
+
+  function cpInit(env: Env, url: string): RequestInit | undefined {
+    return cp(env).mock.calls.find(([input]) => String(input) === url)?.[1] as
+      | RequestInit
+      | undefined;
+  }
+
+  function repoSessionRoutes(overrides: Record<string, Route> = {}): Record<string, Route> {
+    return {
+      "https://internal/environments": () => Response.json({ environments: [], total: 0 }),
+      "https://internal/integration-settings/linear/resolved/*": () =>
+        Response.json({ config: null }),
+      "https://internal/repos": () => Response.json({ repos: [] }),
+      "https://internal/sessions": () =>
+        Response.json({ sessionId: "session-xyz", status: "created" }),
+      "https://internal/sessions/session-xyz/prompt": () =>
+        Response.json({ messageId: "message-1" }),
+      "https://internal/sessions/session-xyz/stop": () => Response.json({ status: "stopping" }),
+      "https://internal/sessions/session-xyz/events?type=token&limit=20": () =>
+        Response.json({ events: [] }),
+      ...overrides,
+    };
+  }
+
+  function catalogRepo(owner: string, name: string) {
+    return {
+      id: 1,
+      owner,
+      name,
+      fullName: `${owner}/${name}`,
+      description: null,
+      private: true,
+      defaultBranch: "main",
+      archived: false,
+    };
+  }
+
+  function resolvedConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      config: {
+        model: null,
+        reasoningEffort: null,
+        allowUserPreferenceOverride: true,
+        allowLabelModelOverride: true,
+        emitToolProgressActivities: true,
+        issueSessionInstructions: null,
+        enabledRepos: null,
+        ...overrides,
+      },
+    };
+  }
+
+  function baseKv(extra: Record<string, string> = {}) {
+    return createFakeKV({
+      "oauth:client-credentials:org-1": storedClientCredentialsToken(),
+      "config:project-repos": JSON.stringify({ "project-1": { owner: "acme", name: "backend" } }),
+      ...extra,
+    });
+  }
+
+  function mappingJson(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      sessionId: "session-xyz",
+      issueId: "issue-1",
+      issueIdentifier: "ENG-42",
+      repoOwner: "acme",
+      repoName: "backend",
+      model: "anthropic/claude-haiku-4-5",
+      agentSessionId: "agent-session-1",
+      organizationId: "org-1",
+      createdAt: Date.now(),
+      ...overrides,
+    });
+  }
+
+  function stopMarkerJson(state: "requested" | "confirmed", actorUserId?: string): string {
+    return JSON.stringify({
+      state,
+      requestedAt: Date.now(),
+      actorUserId,
+      source: "agent_activity",
+    });
+  }
+
+  function makeWebhook(overrides: Partial<AgentSessionWebhook> = {}): AgentSessionWebhook {
+    return {
+      type: "AgentSessionEvent",
+      action: "created",
+      organizationId: "org-1",
+      webhookId: "webhook-created",
+      appUserId: "app-user-1",
+      agentSession: {
+        id: "agent-session-1",
+        creatorId: "human-user-1",
+        issue: {
+          id: "issue-1",
+          identifier: "ENG-42",
+          title: "Wire the fullstack flow",
+          description: "Spanning backend and frontend.",
+          url: "https://linear.app/acme/issue/ENG-42/wire",
+          priority: 0,
+          priorityLabel: "No priority",
+          team: { id: "team-1", key: "ENG", name: "Engineering" },
+          labels: [],
+          project: { id: "project-1", name: "Fullstack" },
+        },
+      },
+      ...overrides,
+    };
+  }
+
+  function followUpWebhook(body = "Please continue."): AgentSessionWebhook {
+    const webhook = makeWebhook({ action: "prompted" });
+    webhook.agentActivity = { userId: "follow-up-human-user", content: { type: "prompt", body } };
+    return webhook;
+  }
+
+  function stopWebhook(userId: string | null = "stopper-1"): AgentSessionWebhook {
+    const webhook = makeWebhook({ action: "prompted" });
+    webhook.agentActivity = {
+      ...(userId ? { userId } : {}),
+      signal: "stop",
+      content: { type: "prompt", body: "stop" },
+    };
+    return webhook;
+  }
+
+  function issueDetailsResponse(delegate: { id: string; name: string } | null = null) {
+    return {
+      data: {
+        issue: {
+          id: "issue-1",
+          identifier: "ENG-42",
+          title: "Wire the fullstack flow",
+          description: "Spanning backend and frontend.",
+          url: "https://linear.app/acme/issue/ENG-42/wire",
+          priority: 0,
+          priorityLabel: "No priority",
+          labels: { nodes: [] },
+          project: { id: "project-1", name: "Fullstack" },
+          assignee: { id: "human-user-1", name: "Ada" },
+          delegate,
+          team: { id: "team-1", key: "ENG", name: "Engineering" },
+          comments: { nodes: [] },
+        },
+      },
+    };
+  }
+
+  const ACTIVITY_TYPENAMES = {
+    prompt: "AgentActivityPromptContent",
+    response: "AgentActivityResponseContent",
+    error: "AgentActivityErrorContent",
+    elicitation: "AgentActivityElicitationContent",
+    thought: "AgentActivityThoughtContent",
+  } as const;
+
+  function activitiesResponse(
+    nodes: Array<{ kind: keyof typeof ACTIVITY_TYPENAMES; body: string; ephemeral?: boolean }>
+  ) {
+    return {
+      data: {
+        agentSession: {
+          activities: {
+            nodes: nodes.map((node, i) => ({
+              id: `activity-${i}`,
+              createdAt: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+              ephemeral: node.ephemeral ?? false,
+              signal: null,
+              content: { __typename: ACTIVITY_TYPENAMES[node.kind], body: node.body },
+            })),
+          },
+        },
+      },
+    };
+  }
+
+  function classifierUncertain(alternatives: string[]) {
+    return () => ({
+      content: [
+        {
+          type: "tool_use",
+          name: "classify_repository",
+          input: {
+            repoId: null,
+            confidence: "low",
+            reasoning: "The issue spans several services.",
+            alternatives,
+          },
+        },
+      ],
+    });
+  }
+
+  /** Interleaved order of Linear operations and control-plane URLs. */
+  function recordSequence(env: Env, fetchMock: Mock): string[] {
+    const sequence: string[] = [];
+    const cpMock = cp(env);
+    const cpImpl = cpMock.getMockImplementation() as (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => Promise<Response>;
+    cpMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      sequence.push(`cp:${String(input)}`);
+      return cpImpl(input, init);
+    });
+    const linearImpl = fetchMock.getMockImplementation() as typeof fetch;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === GRAPHQL_URL) {
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        sequence.push(`linear:${readOperationName(body.query)}`);
+      }
+      return linearImpl(input, init);
+    });
+    return sequence;
+  }
+
+  type FakeKvGet = (key: string, type?: string) => Promise<unknown>;
+
+  /** Override reads of one KV key, delegating every other read to the fake store. */
+  function interceptKvGet(kv: KVNamespace, key: string, value: () => string | null) {
+    const originalGet = vi.mocked(kv.get).getMockImplementation() as unknown as FakeKvGet;
+    vi.mocked(kv.get).mockImplementation(((readKey: string, type?: string) => {
+      if (readKey !== key) return originalGet(readKey, type);
+      const intercepted = value();
+      return intercepted === null ? originalGet(readKey, type) : Promise.resolve(intercepted);
+    }) as unknown as typeof kv.get);
+  }
+
+  function loggedEvents(spy: { mock: { calls: unknown[][] } }): Array<Record<string, unknown>> {
+    return spy.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+  }
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearEnvironmentsLocalCache();
+    clearReposLocalCache();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    stubLinear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // ─── Ack ordering and plan ─────────────────────────────────────────────
+
+  it("acks a new session with an ephemeral thought before the plan and any control-plane call", async () => {
+    const fetchMock = stubLinear();
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    const sequence = recordSequence(env, fetchMock);
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-ack-order");
+
+    expect(sequence[0]).toBe("linear:AgentActivityCreate");
+    expect(sequence[1]).toBe("linear:AgentSessionUpdate");
+    expect(sequence.findIndex((step) => step.startsWith("cp:"))).toBeGreaterThan(1);
+    expect(activities()[0]).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "thought", body: "Analyzing issue and resolving repository..." },
+      ephemeral: true,
+    });
+    expect(sessionUpdates()[0]).toEqual({ plan: makePlan("start") });
+    expect(sessionUpdates().at(-1)).toMatchObject({ plan: makePlan("session_created") });
+  });
+
+  it("acks a follow-up before touching the control plane", async () => {
+    const fetchMock = stubLinear();
+    const { kv } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    const sequence = recordSequence(env, fetchMock);
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-ack");
+
+    expect(sequence[0]).toBe("linear:AgentActivityCreate");
+    expect(activities()[0]).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "thought", body: "Processing follow-up message..." },
+      ephemeral: true,
+    });
+    expect(sequence.findIndex((step) => step.startsWith("cp:"))).toBeGreaterThan(0);
+  });
+
+  it("stores the organization and agent session on the issue mapping", async () => {
+    const { kv, store } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-mapping-org");
+
+    expect(JSON.parse(store.get("issue:issue-1") ?? "null")).toMatchObject({
+      sessionId: "session-xyz",
+      organizationId: "org-1",
+      agentSessionId: "agent-session-1",
+    });
+  });
+
+  // ─── Stop signal ───────────────────────────────────────────────────────
+
+  it("writes the stop marker before stopping, then confirms the stop to the user", async () => {
+    const { kv, store, putCalls } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    const fetchMock = stubControlPlane(env, repoSessionRoutes());
+    let markerStateAtStop: string | undefined;
+    const routes = repoSessionRoutes({
+      "https://internal/sessions/session-xyz/stop": () => {
+        markerStateAtStop = (
+          JSON.parse(store.get("stop:agent-session-1") ?? "null") as { state?: string } | null
+        )?.state;
+        return Response.json({ status: "stopping" });
+      },
+    });
+    stubControlPlane(env, routes);
+
+    await handleAgentSessionEvent(stopWebhook(), env, "trace-stop-confirm");
+
+    expect(putCalls[0].key).toBe("stop:agent-session-1");
+    expect(markerStateAtStop).toBe("requested");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(
+      new Headers(cpInit(env, "https://internal/sessions/session-xyz/stop")?.headers).get(
+        "X-OpenInspect-Actor"
+      )
+    ).toBe("linear:stopper-1");
+    expect(store.has("issue:issue-1")).toBe(false);
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: {
+          type: "response",
+          body: "Stopped the coding session for `ENG-42`. [View session](https://web.example.test/session/session-xyz)",
+        },
+      },
+    ]);
+    expect(sessionUpdates()).toEqual([{ plan: cancelPlanFrom("session_created") }]);
+    expect(JSON.parse(store.get("stop:agent-session-1") ?? "null")).toMatchObject({
+      state: "confirmed",
+      actorUserId: "stopper-1",
+    });
+  });
+
+  it.each([404, 409])("treats a %i from the stop route as already stopped", async (status) => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions/session-xyz/stop": () => new Response(null, { status }),
+      })
+    );
+
+    await handleAgentSessionEvent(stopWebhook(), env, `trace-stop-${status}`);
+
+    expect(store.has("issue:issue-1")).toBe(false);
+    expect(activities()[0]?.content).toMatchObject({ type: "response" });
+    expect(JSON.parse(store.get("stop:agent-session-1") ?? "null")).toMatchObject({
+      state: "confirmed",
+    });
+  });
+
+  it("reports a failed stop, keeps the mapping and leaves the marker unconfirmed", async () => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions/session-xyz/stop": () => new Response("boom", { status: 500 }),
+      })
+    );
+
+    await handleAgentSessionEvent(stopWebhook(), env, "trace-stop-500");
+
+    expect(store.has("issue:issue-1")).toBe(true);
+    expect(activities()).toHaveLength(1);
+    expect(activities()[0].content.type).toBe("error");
+    expect(activities()[0].content.body).toContain("HTTP 500");
+    expect(activities()[0].content.body).toContain("/session/session-xyz");
+    expect(sessionUpdates()).toEqual([]);
+    expect(JSON.parse(store.get("stop:agent-session-1") ?? "null")).toMatchObject({
+      state: "requested",
+    });
+  });
+
+  it("ignores a stop that was already confirmed", async () => {
+    const { kv, putCalls } = baseKv({
+      "issue:issue-1": mappingJson(),
+      "stop:agent-session-1": stopMarkerJson("confirmed", "stopper-1"),
+    });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(stopWebhook(), env, "trace-stop-duplicate");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    expect(activities()).toEqual([]);
+    expect(putCalls).toEqual([]);
+  });
+
+  it("confirms a stop with nothing running when no session is mapped", async () => {
+    const { kv, store } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(stopWebhook(), env, "trace-stop-nothing");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: {
+          type: "response",
+          body: "Stopped. Nothing was running for this request, so there is nothing else to cancel.",
+        },
+      },
+    ]);
+    expect(JSON.parse(store.get("stop:agent-session-1") ?? "null")).toMatchObject({
+      state: "confirmed",
+    });
+  });
+
+  it("does not stop a session that belongs to a newer agent session on the same issue", async () => {
+    const { kv, store } = baseKv({
+      "issue:issue-1": mappingJson({ agentSessionId: "agent-session-newer" }),
+    });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(stopWebhook(), env, "trace-stop-foreign");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    expect(store.has("issue:issue-1")).toBe(true);
+    expect(activities()[0]?.content.body).toContain("Nothing was running");
+  });
+
+  it("refuses to stop a mapped session when Linear did not identify the requester", async () => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(stopWebhook(null), env, "trace-stop-anonymous");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    expect(store.has("issue:issue-1")).toBe(true);
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: {
+          type: "error",
+          body: "Cannot stop the coding session because Linear did not identify who requested the stop.",
+        },
+      },
+    ]);
+    expect(JSON.parse(store.get("stop:agent-session-1") ?? "null")).toMatchObject({
+      state: "requested",
+    });
+  });
+
+  // ─── In-flight abort via stop marker ───────────────────────────────────
+
+  it("clears a stale stop marker before starting a new flow", async () => {
+    const { kv } = baseKv({ "stop:agent-session-1": stopMarkerJson("requested") });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-clear-marker");
+
+    expect(kv.delete).toHaveBeenCalledWith("stop:agent-session-1");
+    expect(cpUrls(env)).toContain("https://internal/sessions");
+  });
+
+  it("aborts silently at the first checkpoint when a stop arrives mid-flight", async () => {
+    const { kv } = baseKv();
+    // A stop request lands after the dispatcher cleared the marker: every
+    // read of the marker from now on sees it.
+    interceptKvGet(kv, "stop:agent-session-1", () => stopMarkerJson("requested", "stopper-1"));
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-abort-in-flight");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    // Only the mandatory ack went out — no plan, no error, no confirmation.
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: { type: "thought", body: "Analyzing issue and resolving repository..." },
+        ephemeral: true,
+      },
+    ]);
+    expect(sessionUpdates()).toEqual([]);
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({
+        msg: "agent_session.aborted_by_stop",
+        trace_id: "trace-abort-in-flight",
+        checkpoint: "after_ack",
+      })
+    );
+  });
+
+  it("stops a session created moments before the stop and forgets it", async () => {
+    const { kv, store } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    const fetchMock = stubControlPlane(env, repoSessionRoutes());
+    // The stop lands right after the control-plane session was created.
+    const sessionCreated = () =>
+      fetchMock.mock.calls.some(([input]) => String(input) === "https://internal/sessions");
+    interceptKvGet(kv, "stop:agent-session-1", () =>
+      sessionCreated() ? stopMarkerJson("requested", "stopper-1") : null
+    );
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-abort-after-create");
+
+    expect(cpUrls(env)).toContain("https://internal/sessions");
+    expect(cpUrls(env)).toContain("https://internal/sessions/session-xyz/stop");
+    expect(cpUrls(env)).not.toContain("https://internal/sessions/session-xyz/prompt");
+    expect(
+      new Headers(cpInit(env, "https://internal/sessions/session-xyz/stop")?.headers).get(
+        "X-OpenInspect-Actor"
+      )
+    ).toBe("linear:stopper-1");
+    expect(store.has("issue:issue-1")).toBe(false);
+    expect(activities().every((activity) => activity.content.type === "thought")).toBe(true);
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({
+        msg: "agent_session.aborted_after_create",
+        session_id: "session-xyz",
+        outcome: "stopped",
+      })
+    );
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({
+        msg: "agent_session.aborted_by_stop",
+        checkpoint: "after_create_session",
+      })
+    );
+  });
+
+  // ─── Dispatcher guard rails ────────────────────────────────────────────
+
+  it("reports an unexpected failure to the user and cancels the remaining plan", async () => {
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions": () => {
+          throw new Error("socket hang up");
+        },
+      })
+    );
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-unhandled");
+
+    const last = activities().at(-1);
+    expect(last?.content.type).toBe("error");
+    expect(last?.content.body).toContain("unexpected error");
+    expect(last?.content.body).toContain("Reference: `trace-unhandled`");
+    expect(sessionUpdates().at(-1)).toEqual({ plan: cancelPlanFrom("repo_resolved") });
+  });
+
+  it("does not cancel a plan that was never written when a flow fails early", async () => {
+    const { kv } = baseKv();
+    vi.mocked(kv.delete).mockRejectedValueOnce(new Error("KV unavailable"));
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-early-failure");
+
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: {
+          type: "error",
+          body: "Open-Inspect hit an unexpected error and could not continue. Reference: `trace-early-failure`",
+        },
+      },
+    ]);
+    expect(sessionUpdates()).toEqual([]);
+  });
+
+  it("tells the user it can only work on issues when the session has none", async () => {
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    const webhook = makeWebhook();
+    delete webhook.agentSession.issue;
+
+    await handleAgentSessionEvent(webhook, env, "trace-no-issue");
+
+    expect(cp(env)).not.toHaveBeenCalled();
+    expect(activities()).toEqual([
+      {
+        agentSessionId: "agent-session-1",
+        content: {
+          type: "error",
+          body: "Open-Inspect can only work on Linear issues. Mention or delegate it from an issue to start a coding session.",
+        },
+      },
+    ]);
+  });
+
+  // ─── Repository elicitation ────────────────────────────────────────────
+
+  function stubAmbiguousRepos(env: Env) {
+    return stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/repos": () =>
+          Response.json({
+            repos: [catalogRepo("acme", "backend"), { ...catalogRepo("acme", "frontend"), id: 2 }],
+            cached: false,
+            cachedAt: "2026-08-02T00:00:00.000Z",
+          }),
+      })
+    );
+  }
+
+  it("offers a select elicitation when several repositories are plausible", async () => {
+    stubLinear(
+      {
+        RepoSuggestions: () => ({
+          data: {
+            issueRepositorySuggestions: {
+              suggestions: [
+                { repositoryFullName: "acme/frontend", confidence: 0.5 },
+                { repositoryFullName: "acme/backend", confidence: 0.3 },
+              ],
+            },
+          },
+        }),
+      },
+      classifierUncertain(["acme/backend", "acme/frontend"])
+    );
+    const { kv } = createFakeKV({
+      "oauth:client-credentials:org-1": storedClientCredentialsToken(),
+    });
+    const env = makeLinearBotEnv(kv);
+    stubAmbiguousRepos(env);
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-select");
+
+    const elicitation = activities().find((activity) => activity.content.type === "elicitation");
+    expect(elicitation).toBeDefined();
+    expect(elicitation?.content.body).toContain("Pick a repository, or reply with `owner/repo`.");
+    expect(elicitation?.content.body).toContain("The issue spans several services.");
+    expect(elicitation?.signal).toBe("select");
+    // Linear's confident-enough suggestion leads; the sub-threshold one falls
+    // back to its classifier position.
+    expect(elicitation?.signalMetadata).toEqual({
+      options: [{ value: "acme/frontend" }, { value: "acme/backend" }],
+    });
+    expect(cpUrls(env)).not.toContain("https://internal/sessions");
+  });
+
+  it("falls back to a markdown list when fewer than two options remain", async () => {
+    stubLinear({}, classifierUncertain(["acme/backend"]));
+    const { kv } = createFakeKV({
+      "oauth:client-credentials:org-1": storedClientCredentialsToken(),
+    });
+    const env = makeLinearBotEnv(kv);
+    stubAmbiguousRepos(env);
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-select-fallback");
+
+    const elicitation = activities().find((activity) => activity.content.type === "elicitation");
+    expect(elicitation?.signal).toBeUndefined();
+    expect(elicitation?.content.body).toContain("**Available repositories:**");
+    expect(elicitation?.content.body).toContain("- **acme/backend**");
+    expect(cpUrls(env)).not.toContain("https://internal/sessions");
+  });
+
+  // ─── Delegate ──────────────────────────────────────────────────────────
+
+  function delegateCalls(): LinearCall[] {
+    return linearCalls().filter((call) => call.operationName === "IssueSetDelegate");
+  }
+
+  it("makes itself the issue delegate when a person started the session and nobody is delegated", async () => {
+    stubLinear({
+      IssueDetails: () => issueDetailsResponse(null),
+      IssueSetDelegate: () => ({ data: { issueUpdate: { success: true } } }),
+    });
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-delegate");
+
+    expect(delegateCalls()).toEqual([
+      {
+        operationName: "IssueSetDelegate",
+        variables: { issueId: "issue-1", delegateId: "app-user-1" },
+      },
+    ]);
+    // The delegate call happens after the session exists, never before.
+    const ops = linearCalls().map((call) => call.operationName);
+    expect(ops.indexOf("IssueSetDelegate")).toBeGreaterThan(ops.indexOf("AgentSessionUpdate"));
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({ msg: "agent_session.delegate", outcome: "set" })
+    );
+  });
+
+  it("does not set the delegate when the integration opted out", async () => {
+    stubLinear({ IssueDetails: () => issueDetailsResponse(null) });
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/integration-settings/linear/resolved/*": () =>
+          Response.json(resolvedConfig({ setIssueDelegateOnStart: false })),
+      })
+    );
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-delegate-opt-out");
+
+    expect(cpUrls(env)).toContain("https://internal/sessions/session-xyz/prompt");
+    expect(delegateCalls()).toEqual([]);
+  });
+
+  it("does not set the delegate for an automation-created session", async () => {
+    stubLinear({ IssueDetails: () => issueDetailsResponse(null) });
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    const webhook = makeWebhook();
+    webhook.agentSession.creatorId = null;
+
+    await handleAgentSessionEvent(webhook, env, "trace-delegate-automation");
+
+    expect(cpUrls(env)).toContain("https://internal/sessions/session-xyz/prompt");
+    expect(delegateCalls()).toEqual([]);
+  });
+
+  it("leaves an existing delegate untouched", async () => {
+    stubLinear({
+      IssueDetails: () => issueDetailsResponse({ id: "human-user-2", name: "Grace" }),
+    });
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-delegate-other");
+
+    expect(delegateCalls()).toEqual([]);
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({
+        msg: "agent_session.delegate",
+        outcome: "delegated_to_other",
+        delegateId: "human-user-2",
+      })
+    );
+  });
+
+  it("skips the delegate when issue details are unavailable or the event is a re-prompt", async () => {
+    // Default GraphQL stub returns no issue → issueDetails is null.
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-delegate-no-details");
+    expect(delegateCalls()).toEqual([]);
+
+    vi.clearAllMocks();
+    stubLinear({ IssueDetails: () => issueDetailsResponse(null) });
+    const { kv: kv2 } = baseKv();
+    const env2 = makeLinearBotEnv(kv2);
+    stubControlPlane(env2, repoSessionRoutes());
+    await handleAgentSessionEvent(
+      makeWebhook({ action: "prompted" }),
+      env2,
+      "trace-delegate-prompted"
+    );
+    expect(cpUrls(env2)).toContain("https://internal/sessions");
+    expect(delegateCalls()).toEqual([]);
+  });
+
+  // ─── Follow-ups ────────────────────────────────────────────────────────
+
+  it("replays the Linear activity history instead of fetching control-plane events", async () => {
+    stubLinear({
+      AgentSessionActivities: (variables) => {
+        expect(variables).toEqual({ id: "agent-session-1", last: 50 });
+        return activitiesResponse([
+          { kind: "prompt", body: "Do the thing" },
+          { kind: "thought", body: "Thinking...", ephemeral: true },
+          { kind: "response", body: "Did the thing" },
+          { kind: "prompt", body: "Please continue." },
+        ]);
+      },
+    });
+    const { kv } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-history");
+
+    expect(cpUrls(env).some((url) => url.includes("/events?"))).toBe(false);
+    const prompt = JSON.parse(
+      String(cpInit(env, "https://internal/sessions/session-xyz/prompt")?.body)
+    ) as { content: string };
+    expect(prompt.content).toContain(
+      "**Earlier conversation on this Linear agent session (oldest first):**"
+    );
+    expect(prompt.content).toContain(
+      '<user_content source="linear_agent_activity_prompt" author="user">\nDo the thing'
+    );
+    expect(prompt.content).toContain(
+      '<user_content source="linear_agent_activity_response" author="agent">\nDid the thing'
+    );
+    expect(prompt.content).not.toContain("Thinking...");
+    expect(prompt.content).not.toContain("Previous agent response");
+    // The triggering prompt appears once, as the follow-up itself, not again as history.
+    expect(prompt.content.split("Please continue.")).toHaveLength(2);
+  });
+
+  it("still consults control-plane events when the history holds no agent turn", async () => {
+    stubLinear({
+      AgentSessionActivities: () =>
+        activitiesResponse([
+          { kind: "prompt", body: "Do the thing" },
+          { kind: "prompt", body: "Please continue." },
+        ]),
+    });
+    const { kv } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions/session-xyz/events?type=token&limit=20": () =>
+          Response.json({ events: [{ type: "token", data: { content: "Latest token." } }] }),
+      })
+    );
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-events");
+
+    expect(cpUrls(env)).toContain(
+      "https://internal/sessions/session-xyz/events?type=token&limit=20"
+    );
+    const prompt = JSON.parse(
+      String(cpInit(env, "https://internal/sessions/session-xyz/prompt")?.body)
+    ) as { content: string };
+    expect(prompt.content).toContain("Latest token.");
+    expect(prompt.content).toContain("Do the thing");
+  });
+
+  it("tells the user when a follow-up was queued behind the current step", async () => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions/session-xyz/prompt": () =>
+          Response.json({ messageId: "message-2", status: "queued" }),
+      })
+    );
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-queued");
+
+    const final = activities().at(-1);
+    expect(final?.content.type).toBe("thought");
+    expect(final?.ephemeral).toBeUndefined();
+    expect(final?.content.body).toContain("queued");
+    expect(final?.content.body).toContain("/session/session-xyz");
+    expect(store.has("keepalive:agent-session-1")).toBe(true);
+  });
+
+  it("confirms a delivered follow-up and keeps the session alive", async () => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-sent");
+
+    expect(activities().at(-1)?.content.body).toContain("Follow-up sent to existing session.");
+    expect(store.has("keepalive:agent-session-1")).toBe(true);
+  });
+
+  it("starts a fresh session when the control plane no longer accepts prompts", async () => {
+    const { kv, store } = baseKv({ "issue:issue-1": mappingJson() });
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(
+      env,
+      repoSessionRoutes({
+        "https://internal/sessions/session-xyz/prompt": () =>
+          Response.json({ error: "session cancelled" }, { status: 409 }),
+        "https://internal/sessions": () =>
+          Response.json({ sessionId: "session-new", status: "created" }),
+        "https://internal/sessions/session-new/prompt": () =>
+          Response.json({ messageId: "message-3" }),
+      })
+    );
+
+    await handleAgentSessionEvent(followUpWebhook(), env, "trace-follow-up-409");
+
+    const urls = cpUrls(env);
+    expect(urls.indexOf("https://internal/sessions")).toBeGreaterThan(
+      urls.indexOf("https://internal/sessions/session-xyz/prompt")
+    );
+    expect(urls).toContain("https://internal/sessions/session-new/prompt");
+    expect(JSON.parse(store.get("issue:issue-1") ?? "null")).toMatchObject({
+      sessionId: "session-new",
+      agentSessionId: "agent-session-1",
+    });
+    expect(activities().some((activity) => activity.content.type === "error")).toBe(false);
+    expect(loggedEvents(logSpy)).toContainEqual(
+      expect.objectContaining({
+        msg: "agent_session.followup_session_gone",
+        session_id: "session-xyz",
+        http_status: 409,
+      })
+    );
+  });
+
+  it("replays the agent session history when an unmapped prompt starts a new session", async () => {
+    stubLinear({
+      AgentSessionActivities: () =>
+        activitiesResponse([
+          { kind: "prompt", body: "Original ask" },
+          { kind: "elicitation", body: "Which repo?" },
+          { kind: "prompt", body: "acme/backend" },
+        ]),
+    });
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+    const webhook = makeWebhook({ action: "prompted" });
+    webhook.agentSession.comment = { body: "Original ask", userId: "human-user-1" };
+    webhook.agentActivity = {
+      userId: "human-user-1",
+      content: { type: "prompt", body: "acme/backend" },
+    };
+
+    await handleAgentSessionEvent(webhook, env, "trace-unmapped-history");
+
+    const prompt = JSON.parse(
+      String(cpInit(env, "https://internal/sessions/session-xyz/prompt")?.body)
+    ) as { content: string };
+    expect(prompt.content).toContain(
+      "**Earlier conversation on this Linear agent session (oldest first):**"
+    );
+    expect(prompt.content).toContain(
+      '<user_content source="linear_agent_activity_prompt" author="user">\nOriginal ask'
+    );
+    expect(prompt.content).toContain(
+      '<user_content source="linear_agent_activity_elicitation" author="agent">\nWhich repo?'
+    );
+    expect(prompt.content).not.toContain(
+      '<user_content source="linear_agent_activity_prompt" author="user">\nacme/backend'
+    );
+    expect(prompt.content).toContain(
+      '<user_content source="linear_repository_clarification" author="unknown">\nacme/backend'
+    );
+  });
+
+  it("does not replay history for a created event", async () => {
+    const fetchMock = stubLinear();
+    const { kv } = baseKv();
+    const env = makeLinearBotEnv(kv);
+    stubControlPlane(env, repoSessionRoutes());
+
+    await handleAgentSessionEvent(makeWebhook(), env, "trace-created-no-history");
+
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) =>
+          String(input) === GRAPHQL_URL && String(init?.body).includes("AgentSessionActivities")
+      )
+    ).toBe(false);
   });
 });

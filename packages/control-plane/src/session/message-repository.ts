@@ -53,6 +53,16 @@ export type AutofixMessageAdmission =
   | { kind: "duplicate"; messageId: string }
   | { kind: "rejected"; reason: "session_closed" | "queue_full" | "attempt_limit" };
 
+/** The processing message as seen by the Linear progress keepalive. */
+export interface ProcessingProgressCandidate {
+  id: string;
+  source: MessageSource;
+  callback_context: string | null;
+  started_at: number | null;
+  progress_notified_at: number | null;
+  stop_confirmation_deadline: number | null;
+}
+
 /** Options for listing messages. */
 export interface ListMessagesOptions {
   cursor?: string | null;
@@ -135,6 +145,18 @@ export class MessageRepository {
     );
     const rows = result.toArray() as Array<{ id: string; started_at: number }>;
     return rows[0] ?? null;
+  }
+
+  getProcessingProgressCandidate(): ProcessingProgressCandidate | null {
+    const result = this.sql.exec(
+      `SELECT id, source, callback_context, started_at, progress_notified_at, stop_confirmation_deadline
+       FROM messages WHERE status = 'processing' LIMIT 1`
+    );
+    return this.rows<ProcessingProgressCandidate>(result)[0] ?? null;
+  }
+
+  markProgressNotified(messageId: string, at: number): void {
+    this.sql.exec(`UPDATE messages SET progress_notified_at = ? WHERE id = ?`, at, messageId);
   }
 
   getNextPendingMessage(): MessageRow | null {

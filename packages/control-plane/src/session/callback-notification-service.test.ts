@@ -7,11 +7,15 @@ import {
   type CallbackServiceDeps,
 } from "./callback-notification-service";
 import type { MessageRepository } from "./message-repository";
+import type { EventRepository, MessageProgressSnapshot } from "./event-repository";
 import type { FetchClient } from "../platform-ports";
 import { verifyCallbackSignature } from "@open-inspect/shared/auth";
 import {
   linearCompletionCallbackSchema,
+  linearProgressCallbackSchema,
   linearToolCallCallbackSchema,
+  MAX_LINEAR_PROGRESS_TEXT_CHARS,
+  MAX_LINEAR_TOOL_RESULT_CHARS,
 } from "@open-inspect/shared/types/session-api";
 
 const LINEAR_CALLBACK_CONTEXT = {
@@ -37,7 +41,16 @@ function createMockLogger(): Logger {
 function createMockRepository() {
   return {
     getMessageCallbackContext: vi.fn<MessageRepository["getMessageCallbackContext"]>(() => null),
+    getMessageStatus: vi.fn<MessageRepository["getMessageStatus"]>(() => "processing"),
     getSession: vi.fn(() => null),
+  };
+}
+
+function createMockEventRepository() {
+  return {
+    getMessageProgressSnapshot: vi.fn<EventRepository["getMessageProgressSnapshot"]>(
+      (): MessageProgressSnapshot => ({ toolCallCount: 0, phase: "thinking" })
+    ),
   };
 }
 
@@ -52,6 +65,7 @@ function createTestHarness(overrides?: {
 }) {
   const log = createMockLogger();
   const repository = createMockRepository();
+  const eventRepository = createMockEventRepository();
 
   const slackBot = createMockFetcher();
   const linearBot = createMockFetcher();
@@ -68,6 +82,7 @@ function createTestHarness(overrides?: {
   const deps: CallbackServiceDeps = {
     repository: repository as CallbackRepository,
     messageRepository: repository as unknown as MessageRepository,
+    eventRepository,
     env,
     log,
     getSessionId: overrides?.getSessionId ?? (() => "session-123"),
@@ -78,6 +93,7 @@ function createTestHarness(overrides?: {
   return {
     service: new CallbackNotificationService(deps),
     repository,
+    eventRepository,
     log,
     env,
     slackBot,
@@ -348,6 +364,219 @@ describe("CallbackNotificationService", () => {
       expect(body.context.issueId).toBe("issue-1");
       expect(linearCompletionCallbackSchema.safeParse(body).success).toBe(true);
       expect(await verifyCallbackSignature(body, "test-secret")).toBe(true);
+    });
+  });
+
+  describe("notifyComplete — termination reason", () => {
+    beforeEach(() => {
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: JSON.stringify(LINEAR_CALLBACK_CONTEXT),
+        source: "linear",
+      });
+      harness.linearBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+    });
+
+    it("includes terminationReason in the Linear payload when provided", async () => {
+      await harness.service.notifyComplete("msg-1", false, "Execution was stopped", {
+        terminationReason: "stopped",
+      });
+
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).toMatchObject({
+        success: false,
+        error: "Execution was stopped",
+        terminationReason: "stopped",
+      });
+      expect(linearCompletionCallbackSchema.safeParse(body).success).toBe(true);
+      expect(await verifyCallbackSignature(body, "test-secret")).toBe(true);
+    });
+
+    it("omits terminationReason when none is provided", async () => {
+      await harness.service.notifyComplete("msg-1", true);
+
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).not.toHaveProperty("terminationReason");
+      expect(linearCompletionCallbackSchema.safeParse(body).success).toBe(true);
+    });
+  });
+
+  describe("notifyProgress", () => {
+    const linearContext = () => {
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: JSON.stringify(LINEAR_CALLBACK_CONTEXT),
+        source: "linear",
+      });
+    };
+
+    it("skips when the message has no callback context", async () => {
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: null,
+        source: "linear",
+      });
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.linearBot.fetch).not.toHaveBeenCalled();
+      expect(harness.log.debug).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "no_callback_context" })
+      );
+    });
+
+    it("skips non-Linear sources", async () => {
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: JSON.stringify({ channel: "C123" }),
+        source: "slack",
+      });
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.slackBot.fetch).not.toHaveBeenCalled();
+      expect(harness.linearBot.fetch).not.toHaveBeenCalled();
+      expect(harness.log.debug).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "non_linear_source" })
+      );
+    });
+
+    it("skips when the Linear signing secret is unbound", async () => {
+      harness = createTestHarness({ env: { SERVICE_AUTH_SECRET_LINEAR_BOT: undefined } });
+      linearContext();
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.linearBot.fetch).not.toHaveBeenCalled();
+      expect(harness.log.debug).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "no_secret" })
+      );
+    });
+
+    it("skips when the Linear binding is missing", async () => {
+      harness = createTestHarness({ env: { LINEAR_BOT: undefined } });
+      linearContext();
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.log.debug).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "no_binding" })
+      );
+    });
+
+    it("skips when the message is no longer processing", async () => {
+      linearContext();
+      vi.mocked(harness.repository.getMessageStatus).mockReturnValue("completed");
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.linearBot.fetch).not.toHaveBeenCalled();
+      expect(harness.eventRepository.getMessageProgressSnapshot).not.toHaveBeenCalled();
+      expect(harness.log.debug).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "message_not_processing" })
+      );
+    });
+
+    it("posts a signed, schema-valid progress snapshot with a single attempt", async () => {
+      linearContext();
+      const longText = "x".repeat(MAX_LINEAR_PROGRESS_TEXT_CHARS);
+      harness.eventRepository.getMessageProgressSnapshot.mockReturnValue({
+        toolCallCount: 3,
+        phase: "tool_call",
+        currentTool: { tool: "bash", callId: "call-3", status: "running" },
+        latestText: longText,
+      });
+      harness.linearBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+
+      await harness.service.notifyProgress("msg-1", { trigger: "step_finish", elapsedMs: 42_000 });
+
+      expect(harness.linearBot.fetch).toHaveBeenCalledOnce();
+      expect(harness.linearBot.fetch).toHaveBeenCalledWith(
+        "https://internal/callbacks/progress",
+        expect.objectContaining({ method: "POST" })
+      );
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).toMatchObject({
+        sessionId: "session-123",
+        messageId: "msg-1",
+        elapsedMs: 42_000,
+        trigger: "step_finish",
+        toolCallCount: 3,
+        phase: "tool_call",
+        currentTool: { tool: "bash", callId: "call-3", status: "running" },
+        latestText: longText,
+        latestTextComplete: true,
+        context: LINEAR_CALLBACK_CONTEXT,
+        timestamp: expect.any(Number),
+      });
+      expect(body.latestText).toHaveLength(MAX_LINEAR_PROGRESS_TEXT_CHARS);
+      expect(linearProgressCallbackSchema.safeParse(body).success).toBe(true);
+      expect(await verifyCallbackSignature(body, "test-secret")).toBe(true);
+      expect(harness.slackBot.fetch).not.toHaveBeenCalled();
+      expect(harness.log.info).toHaveBeenCalledWith(
+        "callback.progress_delivery",
+        expect.objectContaining({
+          message_id: "msg-1",
+          trigger: "step_finish",
+          outcome: "success",
+          attempts: 1,
+          http_status: 200,
+          duration_ms: expect.any(Number),
+        })
+      );
+    });
+
+    it("marks heartbeat text as a mid-stream snapshot", async () => {
+      linearContext();
+      harness.eventRepository.getMessageProgressSnapshot.mockReturnValue({
+        toolCallCount: 0,
+        phase: "responding",
+        latestText: "Working on it",
+      });
+      harness.linearBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 300_000 });
+
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).toMatchObject({
+        trigger: "heartbeat",
+        phase: "responding",
+        latestText: "Working on it",
+        latestTextComplete: false,
+      });
+      expect(body).not.toHaveProperty("currentTool");
+    });
+
+    it("does not retry a failed progress delivery", async () => {
+      linearContext();
+      harness.linearBot.fetch.mockResolvedValue(new Response("nope", { status: 500 }));
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.linearBot.fetch).toHaveBeenCalledOnce();
+      expect(harness.sleep).not.toHaveBeenCalled();
+      expect(harness.log.warn).toHaveBeenCalledWith(
+        "callback.progress_delivery",
+        expect.objectContaining({ outcome: "error", attempts: 1, http_status: 500 })
+      );
+    });
+
+    it("rejects a payload that fails the shared schema before signing", async () => {
+      linearContext();
+      harness.eventRepository.getMessageProgressSnapshot.mockReturnValue({
+        toolCallCount: 0,
+        phase: "thinking",
+        latestText: "y".repeat(MAX_LINEAR_PROGRESS_TEXT_CHARS + 1),
+      });
+
+      await harness.service.notifyProgress("msg-1", { trigger: "heartbeat", elapsedMs: 1000 });
+
+      expect(harness.linearBot.fetch).not.toHaveBeenCalled();
+      expect(harness.log.warn).toHaveBeenCalledWith(
+        "callback.progress",
+        expect.objectContaining({ outcome: "skipped", skip_reason: "invalid_payload" })
+      );
     });
   });
 
@@ -635,9 +864,10 @@ describe("CallbackNotificationService", () => {
         vi.useRealTimers();
       });
 
-      it("fires once per callId even when events arrive past the throttle window", async () => {
+      it("fires once per lifecycle stage per callId: one start and one terminal delivery", async () => {
         // Anthropic emits running+completed for the same tool. OpenAI's
-        // Responses API may report only completed. Either way, one activity.
+        // Responses API may report only completed. Either way, at most one
+        // start and one finish per callId.
         vi.useFakeTimers();
         const start = 1_700_000_000_000;
         vi.setSystemTime(start);
@@ -657,16 +887,146 @@ describe("CallbackNotificationService", () => {
         });
         expect(fetchMock).toHaveBeenCalledTimes(1);
 
-        // Advance well past the 3s throttle so the second call is throttle-eligible
+        // A second non-terminal event for the same callId is a duplicate.
         vi.setSystemTime(start + 5_000);
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          callId: "call-abc",
+          status: "running",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
 
         await harness.service.notifyToolCall("msg-1", {
           type: "tool_call",
           tool: "bash",
           callId: "call-abc",
           status: "completed",
+          output: "done",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+
+        // Once the terminal status is delivered, nothing more for this callId.
+        vi.setSystemTime(start + 10_000);
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          callId: "call-abc",
+          status: "completed",
+          output: "done",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      });
+
+      it("delivers the terminal status with a truncated result for Linear", async () => {
+        vi.useFakeTimers();
+        const start = 1_700_000_000_000;
+        vi.setSystemTime(start);
+        vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+          callback_context: JSON.stringify(LINEAR_CALLBACK_CONTEXT),
+          source: "linear",
+        });
+        const fetchMock = harness.linearBot.fetch;
+        fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+        const output = "o".repeat(MAX_LINEAR_TOOL_RESULT_CHARS + 25);
+
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          args: { cmd: "ls" },
+          callId: "call-1",
+          status: "running",
+          output: "ignored while running",
+        });
+        const startBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+        expect(startBody).not.toHaveProperty("result");
+        expect(startBody).not.toHaveProperty("resultTruncated");
+
+        vi.setSystemTime(start + 5_000);
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          args: { cmd: "ls" },
+          callId: "call-1",
+          status: "completed",
+          output,
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+        expect(body).toMatchObject({
+          callId: "call-1",
+          status: "completed",
+          result: "o".repeat(MAX_LINEAR_TOOL_RESULT_CHARS),
+          resultTruncated: true,
+        });
+        expect(linearToolCallCallbackSchema.safeParse(body).success).toBe(true);
+        expect(await verifyCallbackSignature(body, "test-secret")).toBe(true);
+      });
+
+      it("omits the result for an error status without output", async () => {
+        vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+          callback_context: JSON.stringify(LINEAR_CALLBACK_CONTEXT),
+          source: "linear",
+        });
+        harness.linearBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          args: { cmd: "ls" },
+          callId: "call-err",
+          status: "error",
+        });
+
+        const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+        expect(body.status).toBe("error");
+        expect(body).not.toHaveProperty("result");
+        expect(body).not.toHaveProperty("resultTruncated");
+        expect(linearToolCallCallbackSchema.safeParse(body).success).toBe(true);
+      });
+
+      it("lets a terminal status bypass the throttle only when its start was delivered", async () => {
+        vi.useFakeTimers();
+        const start = 1_700_000_000_000;
+        vi.setSystemTime(start);
+        vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+          callback_context: JSON.stringify({ channel: "C123" }),
+          source: "slack",
+        });
+        const fetchMock = vi.mocked(harness.slackBot.fetch);
+        fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          callId: "call-a",
+          status: "running",
         });
         expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        // Inside the throttle window: a terminal for an undelivered callId waits...
+        vi.setSystemTime(start + 1_000);
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "read",
+          callId: "call-b",
+          status: "completed",
+          output: "contents",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        // ...while the terminal for the delivered start goes straight through.
+        await harness.service.notifyToolCall("msg-1", {
+          type: "tool_call",
+          tool: "bash",
+          callId: "call-a",
+          status: "completed",
+          output: "ok",
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+        expect(body).toMatchObject({ callId: "call-a", status: "completed", result: "ok" });
       });
 
       it("does not throttle a valid Linear callback after rejecting an invalid one", async () => {
@@ -693,7 +1053,7 @@ describe("CallbackNotificationService", () => {
         expect(harness.linearBot.fetch).toHaveBeenCalledOnce();
       });
 
-      it("fires once per distinct callId across many tool calls", async () => {
+      it("fires a start and a finish per distinct callId across many tool calls", async () => {
         vi.useFakeTimers();
         let now = 1_700_000_000_000;
         vi.setSystemTime(now);
@@ -706,7 +1066,8 @@ describe("CallbackNotificationService", () => {
         fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
 
         for (let i = 0; i < 3; i++) {
-          // Each tool emits running then completed; only running should fire
+          // Each tool emits running then completed; the finish follows its own
+          // delivered start without waiting out the throttle window.
           await harness.service.notifyToolCall("msg-1", {
             type: "tool_call",
             tool: "bash",
@@ -719,11 +1080,18 @@ describe("CallbackNotificationService", () => {
             callId: `call-${i}`,
             status: "completed",
           });
+          // A repeated terminal event is a duplicate.
+          await harness.service.notifyToolCall("msg-1", {
+            type: "tool_call",
+            tool: "bash",
+            callId: `call-${i}`,
+            status: "completed",
+          });
           now += 3_001;
           vi.setSystemTime(now);
         }
 
-        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(fetchMock).toHaveBeenCalledTimes(6);
       });
 
       it("evicts the oldest callId (FIFO) once the cap is exceeded", async () => {

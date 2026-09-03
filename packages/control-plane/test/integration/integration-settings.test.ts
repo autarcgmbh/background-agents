@@ -347,6 +347,7 @@ describe("Integration settings API", () => {
               allowUserPreferenceOverride: true,
               allowLabelModelOverride: true,
               emitToolProgressActivities: true,
+              setIssueDelegateOnStart: false,
             },
           },
         }),
@@ -372,6 +373,7 @@ describe("Integration settings API", () => {
           allowUserPreferenceOverride: boolean;
           allowLabelModelOverride: boolean;
           emitToolProgressActivities: boolean;
+          setIssueDelegateOnStart: boolean;
           enabledRepos: string[] | null;
         };
       }>();
@@ -381,6 +383,7 @@ describe("Integration settings API", () => {
       expect(body.config.allowUserPreferenceOverride).toBe(false);
       expect(body.config.allowLabelModelOverride).toBe(true);
       expect(body.config.emitToolProgressActivities).toBe(true);
+      expect(body.config.setIssueDelegateOnStart).toBe(false);
       expect(body.config.enabledRepos).toEqual(["acme/widgets"]);
     });
 
@@ -396,6 +399,7 @@ describe("Integration settings API", () => {
           allowUserPreferenceOverride: boolean;
           allowLabelModelOverride: boolean;
           emitToolProgressActivities: boolean;
+          setIssueDelegateOnStart: boolean;
           enabledRepos: string[] | null;
         };
       }>();
@@ -405,6 +409,7 @@ describe("Integration settings API", () => {
       expect(body.config.allowUserPreferenceOverride).toBe(true);
       expect(body.config.allowLabelModelOverride).toBe(true);
       expect(body.config.emitToolProgressActivities).toBe(true);
+      expect(body.config.setIssueDelegateOnStart).toBe(true);
       expect(body.config.enabledRepos).toBeNull();
     });
 

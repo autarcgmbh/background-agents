@@ -12,6 +12,8 @@ const resolvedLinearConfigSchema = z.object({
   allowUserPreferenceOverride: z.boolean(),
   allowLabelModelOverride: z.boolean(),
   emitToolProgressActivities: z.boolean(),
+  /** Optional so a bot deployed ahead of the control plane keeps parsing its config. */
+  setIssueDelegateOnStart: z.boolean().optional(),
   issueSessionInstructions: z.string().nullable(),
   enabledRepos: z.array(z.string()).nullable(),
 });
@@ -28,6 +30,7 @@ const DEFAULT_CONFIG: ResolvedLinearConfig = {
   allowUserPreferenceOverride: true,
   allowLabelModelOverride: true,
   emitToolProgressActivities: true,
+  setIssueDelegateOnStart: true,
   issueSessionInstructions: null,
   enabledRepos: null,
 };

@@ -13,6 +13,9 @@ import {
 
 const mocks = vi.hoisted(() => ({
   handleAgentSessionEvent: vi.fn(async () => undefined),
+  handleAppUserNotification: vi.fn(async () => undefined),
+  handlePermissionChange: vi.fn(async () => undefined),
+  handleOAuthAppRevoked: vi.fn(async () => undefined),
 }));
 
 vi.mock("./webhook-handler", async (importOriginal) => {
@@ -22,6 +25,12 @@ vi.mock("./webhook-handler", async (importOriginal) => {
     handleAgentSessionEvent: mocks.handleAgentSessionEvent,
   };
 });
+
+vi.mock("./notification-handler", () => ({
+  handleAppUserNotification: mocks.handleAppUserNotification,
+  handlePermissionChange: mocks.handlePermissionChange,
+  handleOAuthAppRevoked: mocks.handleOAuthAppRevoked,
+}));
 
 const { default: app } = await import("./index");
 
@@ -138,6 +147,187 @@ describe("POST /webhook", () => {
     expect(kv.put).not.toHaveBeenCalled();
     expect(ctx.waitUntil).not.toHaveBeenCalled();
     expect(mocks.handleAgentSessionEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /webhook routing of non-session categories", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const notificationPayload = {
+    type: "AppUserNotification",
+    action: "issueUnassignedFromYou",
+    createdAt: "2026-09-03T10:00:00.000Z",
+    organizationId: "org-1",
+    oauthClientId: "client-1",
+    appUserId: "app-user-1",
+    webhookId: "webhook-config-1",
+    notification: {
+      id: "notification-1",
+      type: "issueUnassignedFromYou",
+      issueId: "issue-1",
+      issue: { id: "issue-1", identifier: "ENG-1", title: "Fix it", url: "https://linear.app/x" },
+      actorId: "actor-1",
+    },
+  };
+
+  const permissionPayload = {
+    type: "PermissionChange",
+    action: "teamAccessChanged",
+    organizationId: "org-1",
+    oauthClientId: "client-1",
+    appUserId: "app-user-1",
+    canAccessAllPublicTeams: false,
+    addedTeamIds: ["team-1"],
+    removedTeamIds: [],
+    webhookTimestamp: 1_700_000_000_000,
+    webhookId: "webhook-config-1",
+  };
+
+  const revokedPayload = {
+    type: "OAuthApp",
+    action: "revoked",
+    organizationId: "org-1",
+    oauthClientId: "client-1",
+    webhookTimestamp: 1_700_000_000_000,
+    webhookId: "webhook-config-1",
+  };
+
+  async function post(payload: unknown, deliveryId?: string) {
+    const { kv, putCalls } = createFakeKV();
+    const ctx = makeExecutionContext();
+    const env = makeLinearBotEnv(kv);
+    const res = await app.fetch(await makeWebhookRequest(payload, deliveryId), env, ctx);
+    if (ctx.waitUntil.mock.calls.length > 0) {
+      await Promise.all(ctx.waitUntil.mock.calls.map(([task]) => task as Promise<void>));
+    }
+    return { res, ctx, env, putCalls };
+  }
+
+  it("dispatches AppUserNotification payloads to the notification handler", async () => {
+    const { res, ctx, env, putCalls } = await post(notificationPayload, "delivery-n1");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+    expect(mocks.handleAppUserNotification).toHaveBeenCalledOnce();
+    expect(mocks.handleAppUserNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "AppUserNotification",
+        action: "issueUnassignedFromYou",
+        notification: expect.objectContaining({ issueId: "issue-1", actorId: "actor-1" }),
+      }),
+      env,
+      expect.any(String)
+    );
+    expect(mocks.handleAgentSessionEvent).not.toHaveBeenCalled();
+    expect(putCalls.map((call) => call.key)).toEqual(["event:delivery-n1"]);
+  });
+
+  it("dispatches PermissionChange payloads to the permission handler", async () => {
+    const { res, env } = await post(permissionPayload, "delivery-p1");
+
+    expect(res.status).toBe(200);
+    expect(mocks.handlePermissionChange).toHaveBeenCalledOnce();
+    expect(mocks.handlePermissionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "teamAccessChanged", addedTeamIds: ["team-1"] }),
+      env,
+      expect.any(String)
+    );
+  });
+
+  it("dispatches a revoked OAuthApp payload to the revocation handler", async () => {
+    const { res, env } = await post(revokedPayload, "delivery-o1");
+
+    expect(res.status).toBe(200);
+    expect(mocks.handleOAuthAppRevoked).toHaveBeenCalledOnce();
+    expect(mocks.handleOAuthAppRevoked).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "OAuthApp", action: "revoked", organizationId: "org-1" }),
+      env,
+      expect.any(String)
+    );
+  });
+
+  it("requires Linear-Delivery for the non-session categories too", async () => {
+    for (const payload of [notificationPayload, permissionPayload, revokedPayload]) {
+      const { res, ctx } = await post(payload);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "Missing Linear-Delivery header" });
+      expect(ctx.waitUntil).not.toHaveBeenCalled();
+    }
+    expect(mocks.handleAppUserNotification).not.toHaveBeenCalled();
+    expect(mocks.handlePermissionChange).not.toHaveBeenCalled();
+    expect(mocks.handleOAuthAppRevoked).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates non-session deliveries by Linear-Delivery", async () => {
+    const { kv } = createFakeKV();
+    const env = makeLinearBotEnv(kv);
+    const ctx = makeExecutionContext();
+
+    await app.fetch(await makeWebhookRequest(notificationPayload, "delivery-dup"), env, ctx);
+    const duplicate = await app.fetch(
+      await makeWebhookRequest(notificationPayload, "delivery-dup"),
+      env,
+      ctx
+    );
+
+    expect(await duplicate.json()).toEqual({ ok: true, skipped: true, reason: "duplicate" });
+    expect(mocks.handleAppUserNotification).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a malformed PermissionChange payload", async () => {
+    const { addedTeamIds: _addedTeamIds, ...malformed } = permissionPayload;
+    void _addedTeamIds;
+
+    const { res, ctx } = await post(malformed, "delivery-p-bad");
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Invalid payload" });
+    expect(ctx.waitUntil).not.toHaveBeenCalled();
+    expect(mocks.handlePermissionChange).not.toHaveBeenCalled();
+  });
+
+  it("rejects an AppUserNotification without its notification object", async () => {
+    const { notification: _notification, ...malformed } = notificationPayload;
+    void _notification;
+
+    const { res } = await post(malformed, "delivery-n-bad");
+
+    expect(res.status).toBe(400);
+    expect(mocks.handleAppUserNotification).not.toHaveBeenCalled();
+  });
+
+  it("skips OAuthApp actions other than revoked", async () => {
+    const { res, ctx } = await post({ ...revokedPayload, action: "created" }, "delivery-o-skip");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      skipped: true,
+      reason: "unhandled event type: OAuthApp",
+    });
+    expect(ctx.waitUntil).not.toHaveBeenCalled();
+    expect(mocks.handleOAuthAppRevoked).not.toHaveBeenCalled();
+  });
+
+  it("skips unknown event types without requiring Linear-Delivery", async () => {
+    const { res, ctx } = await post({ type: "Issue", action: "update", data: { id: "issue-1" } });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      skipped: true,
+      reason: "unhandled event type: Issue",
+    });
+    expect(ctx.waitUntil).not.toHaveBeenCalled();
   });
 });
 

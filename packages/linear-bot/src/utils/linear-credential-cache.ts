@@ -70,3 +70,8 @@ export async function writeClientCredentialCache(
 export function deleteLegacyOAuthToken(env: Env, organizationId: string): Promise<void> {
   return env.LINEAR_KV.delete(`${LEGACY_OAUTH_TOKEN_KEY_PREFIX}${organizationId}`);
 }
+
+/** Drop the cached runtime token for a workspace (e.g. after the OAuth app was revoked). */
+export function deleteClientCredentialCache(env: Env, organizationId: string): Promise<void> {
+  return env.LINEAR_KV.delete(clientCredentialsTokenKey(organizationId));
+}

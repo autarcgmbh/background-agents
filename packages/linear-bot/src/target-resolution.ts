@@ -23,8 +23,49 @@ import { getLinearConfig, type ResolvedLinearConfig } from "./utils/integration-
 import { resolveStaticTarget } from "./model-resolution";
 import { getProjectRepoMapping, getTeamRepoMapping } from "./kv-store";
 import { createLogger } from "./logger";
+import { assertNotStopped } from "./stop-marker";
 
 const log = createLogger("target-resolution");
+
+/** Linear repo suggestions below this confidence are not offered as options. */
+export const SUGGESTION_OPTION_MIN_CONFIDENCE = 0.4;
+/** Upper bound on the options in a `select` elicitation. */
+export const MAX_SELECT_OPTIONS = 8;
+
+/**
+ * Candidate repositories to offer in a `select` elicitation when the target
+ * is ambiguous: Linear's own suggestions first (by confidence), then the
+ * classifier's pick and alternatives. Only launchable repositories are kept,
+ * duplicates are removed case-insensitively, and the list is capped. `value`
+ * is the repository full name so a selected option resolves through the same
+ * explicit-mention matcher as a typed `owner/repo` reply.
+ */
+export function buildRepoSelectOptions(params: {
+  classified: RepoConfig | null;
+  alternatives: RepoConfig[];
+  suggestions: Array<{ repositoryFullName: string; confidence: number }>;
+  repos: RepoConfig[];
+}): Array<{ value: string }> {
+  const launchable = new Map(params.repos.map((r) => [r.fullName.toLowerCase(), r.fullName]));
+  const ordered = [
+    ...params.suggestions
+      .filter((s) => s.confidence >= SUGGESTION_OPTION_MIN_CONFIDENCE)
+      .sort((a, b) => b.confidence - a.confidence)
+      .map((s) => s.repositoryFullName),
+    ...(params.classified ? [params.classified.fullName] : []),
+    ...params.alternatives.map((r) => r.fullName),
+  ];
+  const seen = new Set<string>();
+  const options: Array<{ value: string }> = [];
+  for (const name of ordered) {
+    const canonical = launchable.get(name.toLowerCase());
+    if (!canonical || seen.has(canonical.toLowerCase())) continue;
+    seen.add(canonical.toLowerCase());
+    options.push({ value: canonical });
+    if (options.length >= MAX_SELECT_OPTIONS) break;
+  }
+  return options;
+}
 const REPO_PATH_CHAR = /[\w/-]/;
 
 function extendsRepositoryPath(text: string, index: number, direction: -1 | 1): boolean {
@@ -258,13 +299,15 @@ export async function resolveSessionTarget(
   }
 
   // 4. Try Linear's built-in issueRepositorySuggestions API
+  let suggestions: Array<{ repositoryFullName: string; confidence: number }> = [];
   if (repos.length > 0) {
+    await assertNotStopped(env, agentSessionId, "before_repo_suggestions");
     const candidates = repos.map((r) => ({
       hostname: "github.com",
       repositoryFullName: `${r.owner}/${r.name}`,
     }));
 
-    const suggestions = await getRepoSuggestions(client, issue.id, agentSessionId, candidates);
+    suggestions = await getRepoSuggestions(client, issue.id, agentSessionId, candidates);
     const topSuggestion = suggestions.find((s) => s.confidence >= 0.7);
     if (topSuggestion) {
       // Split on the last slash — GitLab nested-group paths
@@ -278,6 +321,7 @@ export async function resolveSessionTarget(
   }
 
   // 5. Fall back to our LLM classification
+  await assertNotStopped(env, agentSessionId, "before_classifier");
   await emitAgentActivity(
     client,
     agentSessionId,
@@ -285,7 +329,7 @@ export async function resolveSessionTarget(
       type: "thought",
       body: "Classifying repository using AI...",
     },
-    true
+    { ephemeral: true }
   );
 
   const classification = await classifyRepo(
@@ -301,20 +345,41 @@ export async function resolveSessionTarget(
   );
 
   if (classification.needsClarification || !classification.repo) {
-    const altList = (classification.alternatives || [])
-      .map((r) => `- **${r.fullName}**: ${r.description}`)
-      .join("\n");
-
-    await emitAgentActivity(client, agentSessionId, {
-      type: "elicitation",
-      body: `I couldn't determine which repository to work on.\n\n${classification.reasoning}\n\n**Available repositories:**\n${altList || "None available"}\n\nPlease reply with the repository name (e.g., \`owner/repo\`).`,
+    await assertNotStopped(env, agentSessionId, "before_elicitation");
+    const alternatives = classification.alternatives ?? [];
+    const options = buildRepoSelectOptions({
+      classified: classification.repo,
+      alternatives,
+      suggestions,
+      repos,
     });
+
+    if (options.length >= 2) {
+      // Linear renders `select` options as buttons; the chosen value comes
+      // back as a `prompt` activity whose body is the repository full name.
+      await emitAgentActivity(
+        client,
+        agentSessionId,
+        {
+          type: "elicitation",
+          body: `I couldn't determine which repository to work on.\n\n${classification.reasoning}\n\nPick a repository, or reply with \`owner/repo\`.`,
+        },
+        { signal: { signal: "select", signalMetadata: { options } } }
+      );
+    } else {
+      const altList = alternatives.map((r) => `- **${r.fullName}**: ${r.description}`).join("\n");
+      await emitAgentActivity(client, agentSessionId, {
+        type: "elicitation",
+        body: `I couldn't determine which repository to work on.\n\n${classification.reasoning}\n\n**Available repositories:**\n${altList || "None available"}\n\nPlease reply with the repository name (e.g., \`owner/repo\`).`,
+      });
+    }
 
     log.warn("agent_session.classification_uncertain", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
       confidence: classification.confidence,
       reasoning: classification.reasoning,
+      select_option_count: options.length,
     });
     return null;
   }

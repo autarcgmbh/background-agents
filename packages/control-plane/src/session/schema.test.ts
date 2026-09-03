@@ -484,6 +484,16 @@ describe("applyMigrations", () => {
     );
   });
 
+  it("adds a nullable progress_notified_at anchor for fresh and migrated sessions", () => {
+    const messagesTable = SCHEMA_SQL.split("CREATE TABLE IF NOT EXISTS messages")[1]?.split(
+      ");"
+    )[0];
+    expect(messagesTable).toContain("progress_notified_at INTEGER");
+    expect(MIGRATIONS.find((entry) => entry.id === 47)?.run).toContain(
+      "ADD COLUMN progress_notified_at INTEGER"
+    );
+  });
+
   it("adds Autofix admission metadata and indexes for fresh and migrated sessions", () => {
     const messagesTable = SCHEMA_SQL.split("CREATE TABLE IF NOT EXISTS messages")[1]?.split(
       ");"

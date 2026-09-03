@@ -18,6 +18,7 @@ import {
 } from "@open-inspect/shared/models";
 import type { SandboxEvent } from "@open-inspect/shared/types/sandbox-events";
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
+import type { LinearTerminationReason } from "@open-inspect/shared/types/session-api";
 import type { MessageSource } from "@open-inspect/shared/types/sessions";
 import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 import type { ClientInfo } from "../types";
@@ -35,6 +36,7 @@ import type { SessionMessenger } from "./messenger";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
+import type { ProgressKeepalive } from "./progress-keepalive";
 import type { SessionStatusService } from "./session-status-service";
 import type { EnqueuePromptRequest } from "./enqueue-prompt-contract";
 import { getAvatarUrl } from "./participant-service";
@@ -169,7 +171,8 @@ export class SessionMessageQueue {
     private readonly scmProvider: SourceControlProviderName,
     private readonly alarmScheduler: AlarmScheduler,
     /** Resolved per use so it honors settings persisted after construction. */
-    private readonly getExecutionTimeoutMs: () => number
+    private readonly getExecutionTimeoutMs: () => number,
+    private readonly progressKeepalive: Pick<ProgressKeepalive, "armForDispatch">
   ) {}
 
   async enqueueAutofix(
@@ -385,7 +388,7 @@ export class SessionMessageQueue {
         event: "provider_auth.unavailable",
         model: resolvedModel,
       });
-      if (this.failMessage(message, authenticationError, now, "pending")) {
+      if (this.failMessage(message, authenticationError, now, "pending", "provider_unavailable")) {
         this.broadcastPromptQueue();
         await this.sessionStatus.reconcileAfterExecution(false);
         await this.processMessageQueue();
@@ -488,6 +491,7 @@ export class SessionMessageQueue {
       // Execution timeout shares the DO's single alarm slot with lifecycle checks.
       const deadline = now + this.getExecutionTimeoutMs();
       await this.alarmScheduler.schedule(deadline);
+      await this.progressKeepalive.armForDispatch(message.id, now);
 
       this.backgroundTasks.submit(() => this.callbackService.notifyStarted(message.id), {
         name: "callback.notify_started",
@@ -525,7 +529,7 @@ export class SessionMessageQueue {
 
     if (
       processingMessage &&
-      this.failMessage(processingMessage, "Execution was stopped", now, "processing")
+      this.failMessage(processingMessage, "Execution was stopped", now, "processing", "stopped")
     ) {
       stoppedMessageId = processingMessage.id;
       const stopConfirmationDeadline = now + STOP_CONFIRMATION_TIMEOUT_MS;
@@ -582,12 +586,24 @@ export class SessionMessageQueue {
   cancelExecution(): void {
     const now = Date.now();
     for (const message of this.messageRepository.listPendingMessagesWithCreatedAt()) {
-      this.failMessage(message, "Execution was cancelled before it started", now, "pending");
+      this.failMessage(
+        message,
+        "Execution was cancelled before it started",
+        now,
+        "pending",
+        "cancelled"
+      );
     }
 
     const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();
     if (processingMessage) {
-      this.failMessage(processingMessage, "Execution was cancelled", now, "processing");
+      this.failMessage(
+        processingMessage,
+        "Execution was cancelled",
+        now,
+        "processing",
+        "cancelled"
+      );
     }
 
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
@@ -608,7 +624,9 @@ export class SessionMessageQueue {
     const processingMessage = this.messageRepository.getProcessingMessageWithCreatedAt();
     if (!processingMessage) return;
 
-    if (!this.failMessage(processingMessage, error, now, "processing")) {
+    const terminationReason: LinearTerminationReason =
+      error === STUCK_PROCESSING_ERROR ? "execution_timeout" : "sandbox_failure";
+    if (!this.failMessage(processingMessage, error, now, "processing", terminationReason)) {
       return;
     }
     this.messenger.broadcast({ type: "processing_status", isProcessing: false });
@@ -620,7 +638,8 @@ export class SessionMessageQueue {
     message: { id: string; created_at: number },
     error: string,
     completedAt: number,
-    expectedStatus: "pending" | "processing"
+    expectedStatus: "pending" | "processing",
+    terminationReason: LinearTerminationReason
   ): boolean {
     const event: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
@@ -657,7 +676,7 @@ export class SessionMessageQueue {
       }
     );
     this.backgroundTasks.submit(
-      () => this.callbackService.notifyComplete(message.id, false, error),
+      () => this.callbackService.notifyComplete(message.id, false, error, { terminationReason }),
       {
         name: "callback.notify_complete",
         context: { message_id: message.id },

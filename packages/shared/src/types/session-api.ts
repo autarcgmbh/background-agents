@@ -85,11 +85,26 @@ export const linearStartCallbackSchema = z.strictObject({
 
 export type LinearStartCallback = z.infer<typeof linearStartCallbackSchema>;
 
+/**
+ * Why a Linear message ended unsuccessfully. `stopped` and `cancelled` are
+ * user-initiated, so the bot confirms them itself and must not post an error.
+ */
+export const linearTerminationReasonSchema = z.enum([
+  "stopped",
+  "cancelled",
+  "execution_timeout",
+  "sandbox_failure",
+  "provider_unavailable",
+]);
+
+export type LinearTerminationReason = z.infer<typeof linearTerminationReasonSchema>;
+
 export const linearCompletionCallbackPayloadSchema = z.strictObject({
   sessionId: nonEmptyStringSchema,
   messageId: nonEmptyStringSchema,
   success: z.boolean(),
   error: z.string().optional(),
+  terminationReason: linearTerminationReasonSchema.optional(),
   timestamp: z.number().refine(Number.isFinite),
   context: linearCallbackContextSchema,
 });
@@ -100,12 +115,18 @@ export const linearCompletionCallbackSchema = linearCompletionCallbackPayloadSch
 
 export type LinearCompletionCallback = z.infer<typeof linearCompletionCallbackSchema>;
 
+/** Cap on the tool output forwarded to Linear as an `action` result. */
+export const MAX_LINEAR_TOOL_RESULT_CHARS = 1000;
+
 export const linearToolCallCallbackPayloadSchema = z.strictObject({
   sessionId: nonEmptyStringSchema,
   tool: nonEmptyStringSchema,
   args: z.record(z.string(), z.unknown()),
   callId: nonEmptyStringSchema,
   status: z.string().optional(),
+  /** Truncated tool output; present only on terminal (`completed`/`error`) deliveries. */
+  result: z.string().max(MAX_LINEAR_TOOL_RESULT_CHARS).optional(),
+  resultTruncated: z.boolean().optional(),
   timestamp: z.number().refine(Number.isFinite),
   context: linearCallbackContextSchema,
 });
@@ -115,6 +136,48 @@ export const linearToolCallCallbackSchema = linearToolCallCallbackPayloadSchema.
 });
 
 export type LinearToolCallCallback = z.infer<typeof linearToolCallCallbackSchema>;
+
+/** Cap on the assistant-text snippet carried by a Linear progress callback. */
+export const MAX_LINEAR_PROGRESS_TEXT_CHARS = 2000;
+
+export const linearProgressPhaseSchema = z.enum(["thinking", "tool_call", "responding"]);
+export type LinearProgressPhase = z.infer<typeof linearProgressPhaseSchema>;
+
+/**
+ * `heartbeat` — periodic keepalive while a Linear message is running, so the
+ * Linear agent session never goes stale. `step_finish` — an assistant text
+ * segment just completed (the model paused to call tools), so the bot can
+ * surface that text immediately.
+ */
+export const linearProgressTriggerSchema = z.enum(["heartbeat", "step_finish"]);
+export type LinearProgressTrigger = z.infer<typeof linearProgressTriggerSchema>;
+
+export const linearProgressCallbackPayloadSchema = z.strictObject({
+  sessionId: nonEmptyStringSchema,
+  messageId: nonEmptyStringSchema,
+  timestamp: z.number().refine(Number.isFinite),
+  elapsedMs: z.number().int().nonnegative(),
+  trigger: linearProgressTriggerSchema,
+  toolCallCount: z.number().int().nonnegative().optional(),
+  phase: linearProgressPhaseSchema.optional(),
+  currentTool: z
+    .strictObject({
+      tool: nonEmptyStringSchema,
+      callId: nonEmptyStringSchema,
+      status: z.string().optional(),
+    })
+    .optional(),
+  latestText: z.string().max(MAX_LINEAR_PROGRESS_TEXT_CHARS).optional(),
+  /** True when `latestText` is a finished segment rather than a mid-stream snapshot. */
+  latestTextComplete: z.boolean().optional(),
+  context: linearCallbackContextSchema,
+});
+
+export const linearProgressCallbackSchema = linearProgressCallbackPayloadSchema.extend({
+  signature: nonEmptyStringSchema,
+});
+
+export type LinearProgressCallback = z.infer<typeof linearProgressCallbackSchema>;
 
 export const automationCallbackContextSchema = z.object({
   source: z.literal("automation"),

@@ -434,6 +434,7 @@ async function handleGetResolvedConfig(
         allowUserPreferenceOverride: linearSettings.allowUserPreferenceOverride ?? true,
         allowLabelModelOverride: linearSettings.allowLabelModelOverride ?? true,
         emitToolProgressActivities: linearSettings.emitToolProgressActivities ?? true,
+        setIssueDelegateOnStart: linearSettings.setIssueDelegateOnStart ?? true,
         issueSessionInstructions: linearSettings.issueSessionInstructions ?? null,
         enabledRepos,
       },

@@ -88,6 +88,7 @@ function createMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     status: "pending",
     error_message: null,
     stop_confirmation_deadline: null,
+    progress_notified_at: null,
     created_at: 1000,
     started_at: null,
     completed_at: null,
@@ -199,6 +200,9 @@ function buildQueue() {
     notifyComplete: vi.fn(async () => {}),
     notifyStarted: vi.fn(async () => {}),
   };
+  const progressKeepalive = {
+    armForDispatch: vi.fn(async (_messageId: string, _dispatchedAt: number) => {}),
+  };
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(async () => {}) };
@@ -250,12 +254,14 @@ function buildQueue() {
         completeDelivery: vi.fn(),
       }
     ),
-    () => executionTimeoutMs
+    () => executionTimeoutMs,
+    progressKeepalive
   );
 
   return {
     queue,
     repository,
+    progressKeepalive,
     attachmentRepository,
     wsManager,
     participantService,
@@ -1140,6 +1146,36 @@ describe("SessionMessageQueue", () => {
     expect(h.backgroundTasks.submissions).toHaveLength(0);
   });
 
+  it("arms the progress keepalive after a prompt is dispatched to the sandbox", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-linear" }));
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    const before = Date.now();
+
+    await h.queue.processMessageQueue();
+
+    expect(h.progressKeepalive.armForDispatch).toHaveBeenCalledOnce();
+    const [messageId, dispatchedAt] = h.progressKeepalive.armForDispatch.mock.calls[0];
+    expect(messageId).toBe("msg-linear");
+    expect(dispatchedAt).toBeGreaterThanOrEqual(before);
+    expect(dispatchedAt).toBeLessThanOrEqual(Date.now());
+    // The execution deadline is armed first so the keepalive can never delay it.
+    expect(h.setAlarm.mock.invocationCallOrder[0]).toBeLessThan(
+      h.progressKeepalive.armForDispatch.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("does not arm the progress keepalive when sandbox dispatch fails", async () => {
+    const h = buildQueue();
+    h.repository.getNextPendingMessage.mockReturnValueOnce(createMessage({ id: "msg-failed" }));
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+    h.wsManager.send.mockReturnValue(false);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.progressKeepalive.armForDispatch).not.toHaveBeenCalled();
+  });
+
   describe("execution timeout scheduling", () => {
     function dispatchPrompt(h: ReturnType<typeof buildQueue>) {
       h.repository.getNextPendingMessage.mockReturnValue(createMessage());
@@ -1474,9 +1510,93 @@ describe("SessionMessageQueue", () => {
     expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
       "msg-crashed",
       false,
-      "OpenCode repeatedly crashed"
+      "OpenCode repeatedly crashed",
+      { terminationReason: "sandbox_failure" }
     );
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+  });
+
+  describe("termination reasons", () => {
+    it("reports a stopped execution as stopped", async () => {
+      const h = buildQueue();
+      h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+      h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+        id: "msg-stopped",
+        created_at: 900,
+      });
+
+      await h.queue.stopExecution();
+      await h.backgroundTasks.settle();
+
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+        "msg-stopped",
+        false,
+        "Execution was stopped",
+        { terminationReason: "stopped" }
+      );
+    });
+
+    it("reports cancelled pending and processing prompts as cancelled", async () => {
+      const h = buildQueue();
+      h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
+        { id: "msg-pending", created_at: 700 },
+      ]);
+      h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+        id: "msg-processing",
+        created_at: 800,
+      });
+
+      h.queue.cancelExecution();
+      await h.backgroundTasks.settle();
+
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+        "msg-pending",
+        false,
+        "Execution was cancelled before it started",
+        { terminationReason: "cancelled" }
+      );
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+        "msg-processing",
+        false,
+        "Execution was cancelled",
+        { terminationReason: "cancelled" }
+      );
+    });
+
+    it("reports the default stuck-processing failure as an execution timeout", async () => {
+      const h = buildQueue();
+      h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+        id: "msg-timeout",
+        created_at: 800,
+      });
+
+      await h.queue.failStuckProcessingMessage();
+      await h.backgroundTasks.settle();
+
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+        "msg-timeout",
+        false,
+        "Execution timed out (stuck processing)",
+        { terminationReason: "execution_timeout" }
+      );
+    });
+
+    it("reports a provider authentication failure as provider unavailable", async () => {
+      const h = buildQueue();
+      // One-shot: the failure branch re-enters processMessageQueue for the next prompt.
+      h.repository.getNextPendingMessage.mockReturnValueOnce(createMessage({ id: "msg-auth" }));
+      h.getProviderAuthenticationError.mockResolvedValueOnce("Provider credentials expired");
+
+      await h.queue.processMessageQueue();
+      await h.backgroundTasks.settle();
+
+      expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+        "msg-auth",
+        false,
+        "Provider credentials expired",
+        { terminationReason: "provider_unavailable" }
+      );
+    });
   });
 
   it("redrives a pending prompt after fatal sandbox termination completes", async () => {

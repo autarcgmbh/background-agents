@@ -8,9 +8,9 @@ import { getLinearClient } from "../utils/linear-client";
 import { transitionIssueToStarted } from "../utils/issue-start-transition";
 import { abortable } from "../utils/abortable";
 
+import { isStaleCallback } from "./constants";
+
 const log = createLogger("callback");
-const START_CALLBACK_MAX_AGE_MS = 5 * 60 * 1000;
-const START_CALLBACK_MAX_FUTURE_SKEW_MS = 60 * 1000;
 export const START_CALLBACK_LINEAR_TIMEOUT_MS = 20_000;
 
 interface StartCallbackDependencies {
@@ -63,7 +63,7 @@ export function createStartCallbackRouter(
     if (rejection) return rejection;
 
     const ageMs = requestStartedAt - payload.timestamp;
-    if (ageMs > START_CALLBACK_MAX_AGE_MS || ageMs < -START_CALLBACK_MAX_FUTURE_SKEW_MS) {
+    if (isStaleCallback(payload.timestamp, requestStartedAt)) {
       log.warn("callback.started", {
         ...callbackLogFields,
         outcome: "skipped",

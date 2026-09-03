@@ -546,6 +546,13 @@ export class IntegrationSettingsStore {
     }
 
     if (
+      settings.setIssueDelegateOnStart !== undefined &&
+      typeof settings.setIssueDelegateOnStart !== "boolean"
+    ) {
+      throw new IntegrationSettingsValidationError("setIssueDelegateOnStart must be a boolean");
+    }
+
+    if (
       settings.issueSessionInstructions !== undefined &&
       typeof settings.issueSessionInstructions !== "string"
     ) {

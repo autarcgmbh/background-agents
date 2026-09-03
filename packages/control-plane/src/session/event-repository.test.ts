@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { MAX_LINEAR_PROGRESS_TEXT_CHARS } from "@open-inspect/shared/types/session-api";
 import { EventRepository } from "./event-repository";
 import type { SqlResult, SqlStorage } from "./sql-storage";
 
@@ -191,6 +192,87 @@ describe("EventRepository", () => {
         "msg-1",
         1000,
       ]);
+    });
+  });
+
+  describe("getMessageProgressSnapshot", () => {
+    const TOOL_CALLS_QUERY = `SELECT data, created_at FROM events
+         WHERE type = 'tool_call' AND message_id = ?
+         ORDER BY created_at DESC, timeline_sequence DESC`;
+    const TOKEN_QUERY = `SELECT data, created_at FROM events WHERE id = ?`;
+
+    function toolCall(callId: string, status: string, createdAt: number) {
+      return {
+        data: JSON.stringify({ type: "tool_call", tool: "bash", callId, status, args: {} }),
+        created_at: createdAt,
+      };
+    }
+
+    it("reports thinking with no activity", () => {
+      expect(repository.getMessageProgressSnapshot("msg-1")).toEqual({
+        toolCallCount: 0,
+        phase: "thinking",
+      });
+      expect(mock.calls[0].params).toEqual(["msg-1"]);
+      expect(mock.calls[1].params).toEqual(["token:msg-1"]);
+    });
+
+    it("reports the running tool while a tool call is unfinished", () => {
+      mock.setRows(TOOL_CALLS_QUERY, [
+        toolCall("call-2", "running", 2000),
+        toolCall("call-1", "completed", 1000),
+      ]);
+      mock.setRows(TOKEN_QUERY, [
+        { data: JSON.stringify({ type: "token", content: "Let me check" }), created_at: 2500 },
+      ]);
+
+      expect(repository.getMessageProgressSnapshot("msg-1")).toEqual({
+        toolCallCount: 2,
+        currentTool: { tool: "bash", callId: "call-2", status: "running" },
+        phase: "tool_call",
+        latestText: "Let me check",
+      });
+    });
+
+    it("reports responding when text arrived after the newest tool call", () => {
+      mock.setRows(TOOL_CALLS_QUERY, [toolCall("call-1", "completed", 1000)]);
+      mock.setRows(TOKEN_QUERY, [
+        {
+          data: JSON.stringify({ type: "token", content: "Here is the answer" }),
+          created_at: 3000,
+        },
+      ]);
+
+      expect(repository.getMessageProgressSnapshot("msg-1")).toEqual({
+        toolCallCount: 1,
+        phase: "responding",
+        latestText: "Here is the answer",
+      });
+    });
+
+    it("reports thinking when the newest tool call postdates the text", () => {
+      mock.setRows(TOOL_CALLS_QUERY, [toolCall("call-1", "completed", 4000)]);
+      mock.setRows(TOKEN_QUERY, [
+        { data: JSON.stringify({ type: "token", content: "Earlier text" }), created_at: 3000 },
+      ]);
+
+      expect(repository.getMessageProgressSnapshot("msg-1")).toMatchObject({
+        phase: "thinking",
+        latestText: "Earlier text",
+      });
+    });
+
+    it("keeps the tail of long text within the Linear cap and tolerates malformed rows", () => {
+      const content = "a".repeat(500) + "b".repeat(MAX_LINEAR_PROGRESS_TEXT_CHARS);
+      mock.setRows(TOOL_CALLS_QUERY, [{ data: "{not json", created_at: 1000 }]);
+      mock.setRows(TOKEN_QUERY, [
+        { data: JSON.stringify({ type: "token", content }), created_at: 2000 },
+      ]);
+
+      const snapshot = repository.getMessageProgressSnapshot("msg-1");
+      expect(snapshot.toolCallCount).toBe(1);
+      expect(snapshot.phase).toBe("responding");
+      expect(snapshot.latestText).toBe("b".repeat(MAX_LINEAR_PROGRESS_TEXT_CHARS));
     });
   });
 

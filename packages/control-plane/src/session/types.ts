@@ -111,6 +111,7 @@ export interface MessageRow {
   status: MessageStatus;
   error_message: string | null;
   stop_confirmation_deadline: number | null;
+  progress_notified_at: number | null; // Last Linear progress callback; keepalive anchor
   created_at: number;
   started_at: number | null;
   completed_at: number | null;

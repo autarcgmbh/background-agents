@@ -4,6 +4,7 @@ import type { BackgroundTasks } from "../../platform-ports";
 import type { CallbackNotificationService } from "../callback-notification-service";
 import type { EventRepository } from "../event-repository";
 import type { SessionMessenger } from "../messenger";
+import type { ProgressKeepalive } from "../progress-keepalive";
 import type { SessionCoreRepository } from "../session-core-repository";
 import { persistSandboxEvent, type SandboxEventContext } from "./context";
 
@@ -22,7 +23,8 @@ export class SandboxStreamingEventHandler {
     private readonly eventRepository: EventRepository,
     private readonly callbackService: CallbackNotificationService,
     private readonly messenger: SessionMessenger,
-    private readonly updateLastActivity: (timestamp: number) => void
+    private readonly updateLastActivity: (timestamp: number) => void,
+    private readonly progressKeepalive: Pick<ProgressKeepalive, "onStepFinish">
   ) {}
 
   handleToken(event: Extract<SandboxEvent, { type: "token" }>, context: SandboxEventContext): void {
@@ -59,6 +61,9 @@ export class SandboxStreamingEventHandler {
       event.cost > 0
     ) {
       this.repository.addSessionCost(event.cost, context.now);
+    }
+    if (event.type === "step_finish" && context.messageId) {
+      this.progressKeepalive.onStepFinish(context.messageId, event.reason, context.now);
     }
     this.messenger.broadcast({ type: "sandbox_event", event });
   }

@@ -14,16 +14,24 @@ type RetryResult<TValue, TFailure> =
   | { outcome: "delivered"; attempts: number; value: TValue }
   | { outcome: "failed"; attempts: number; failure?: TFailure };
 
+export interface RetryDeliveryOptions {
+  /** `null` disables the per-attempt abort timer. Defaults to CALLBACK_ATTEMPT_TIMEOUT_MS. */
+  attemptTimeoutMs?: number | null;
+  /** Total attempts including the first. Defaults to CALLBACK_ATTEMPTS. */
+  attempts?: number;
+}
+
 export async function retryDelivery<TValue, TFailure>(
   send: (signal: AbortSignal) => Promise<RetryAttemptResult<TValue, TFailure>>,
   sleep: (ms: number) => Promise<void>,
   onFailure: (failure: RetryFailure<TFailure>) => void | Promise<void>,
-  options: { attemptTimeoutMs?: number | null } = {}
+  options: RetryDeliveryOptions = {}
 ): Promise<RetryResult<TValue, TFailure>> {
   const attemptTimeoutMs =
     options.attemptTimeoutMs === undefined ? CALLBACK_ATTEMPT_TIMEOUT_MS : options.attemptTimeoutMs;
+  const maxAttempts = options.attempts ?? CALLBACK_ATTEMPTS;
   let finalFailure: TFailure | undefined;
-  for (let attempt = 1; attempt <= CALLBACK_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
     const timeout =
       attemptTimeoutMs === null
@@ -49,11 +57,11 @@ export async function retryDelivery<TValue, TFailure>(
       // Observability must not alter the delivery retry policy.
     }
 
-    if (attempt < CALLBACK_ATTEMPTS) await sleep(CALLBACK_RETRY_DELAY_MS);
+    if (attempt < maxAttempts) await sleep(CALLBACK_RETRY_DELAY_MS);
   }
   return {
     outcome: "failed",
-    attempts: CALLBACK_ATTEMPTS,
+    attempts: maxAttempts,
     ...(finalFailure !== undefined ? { failure: finalFailure } : {}),
   };
 }
@@ -72,7 +80,7 @@ export async function deliverWithRetry(
   send: (signal: AbortSignal) => Promise<Response>,
   sleep: (ms: number) => Promise<void>,
   onFailure: (failure: DeliveryFailure) => void | Promise<void>,
-  options: { attemptTimeoutMs?: number | null } = {}
+  options: RetryDeliveryOptions = {}
 ): Promise<DeliveryResult> {
   const result = await retryDelivery(
     async (signal) => {
