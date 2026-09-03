@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatCompletionComment, formatToolAction } from "./callbacks";
+import type { LinearCompletionCallback } from "@open-inspect/shared/types/session-api";
+import {
+  formatCompletionComment,
+  formatToolAction,
+  formatToolResult,
+  isUserInitiatedTermination,
+  TOOL_RESULT_MAX_CHARS,
+} from "./callbacks";
 
 // ─── formatToolAction ────────────────────────────────────────────────────────
 
@@ -95,6 +102,109 @@ describe("formatToolAction", () => {
     expect(result.action).toBe("fetch_url");
     expect(result.parameter).toHaveLength(200);
     expect(result.parameter).toBe("x".repeat(200));
+  });
+});
+
+// ─── formatToolAction with tool output ───────────────────────────────────────
+
+describe("formatToolAction with output", () => {
+  it("attaches the fenced output as result", () => {
+    expect(formatToolAction("bash", { command: "npm test" }, "12 passed")).toEqual({
+      action: "Run",
+      parameter: "npm test",
+      result: "```\n12 passed\n```",
+    });
+  });
+
+  it("attaches results for file and unknown tools alike", () => {
+    expect(formatToolAction("read_file", { path: "README.md" }, "# Title")).toEqual({
+      action: "Read",
+      parameter: "README.md",
+      result: "```\n# Title\n```",
+    });
+    expect(formatToolAction("search", { query: "foo" }, "3 hits")).toEqual({
+      action: "search",
+      parameter: "foo",
+      result: "```\n3 hits\n```",
+    });
+  });
+
+  it("omits result entirely when output is absent, empty or whitespace", () => {
+    for (const output of [undefined, "", "   \n"]) {
+      const action = formatToolAction("bash", { command: "ls" }, output);
+      expect(action).toEqual({ action: "Run", parameter: "ls" });
+      expect(action).not.toHaveProperty("result");
+    }
+  });
+
+  it("truncates long output to the result cap with an ellipsis", () => {
+    const action = formatToolAction("bash", { command: "cat log" }, "x".repeat(1000));
+
+    const inner = action.result?.slice("```\n".length, -"\n```".length) ?? "";
+    expect(inner).toHaveLength(TOOL_RESULT_MAX_CHARS);
+    expect(inner.endsWith("…")).toBe(true);
+    expect(inner.startsWith("x".repeat(TOOL_RESULT_MAX_CHARS - 1))).toBe(true);
+  });
+
+  it("keeps output exactly at the cap intact", () => {
+    const exact = "y".repeat(TOOL_RESULT_MAX_CHARS);
+    expect(formatToolResult(exact)).toBe(`\`\`\`\n${exact}\n\`\`\``);
+  });
+
+  it("trims surrounding whitespace before fencing", () => {
+    expect(formatToolResult("  done \n")).toBe("```\ndone\n```");
+  });
+});
+
+// ─── isUserInitiatedTermination ──────────────────────────────────────────────
+
+describe("isUserInitiatedTermination", () => {
+  const base: LinearCompletionCallback = {
+    sessionId: "session-1",
+    messageId: "message-1",
+    success: false,
+    timestamp: 1_700_000_000_000,
+    signature: "sig",
+    context: {
+      source: "linear",
+      issueId: "issue-1",
+      issueIdentifier: "ENG-1",
+      issueUrl: "https://linear.app/acme/issue/ENG-1",
+      model: "anthropic/claude-haiku-4-5",
+    },
+  };
+
+  it.each(["stopped", "cancelled"] as const)("is true for terminationReason %s", (reason) => {
+    expect(isUserInitiatedTermination({ ...base, terminationReason: reason })).toBe(true);
+  });
+
+  it.each(["execution_timeout", "sandbox_failure", "provider_unavailable"] as const)(
+    "is false for terminationReason %s",
+    (reason) => {
+      expect(isUserInitiatedTermination({ ...base, terminationReason: reason })).toBe(false);
+    }
+  );
+
+  it("recognizes the legacy stopped error text when no reason is present", () => {
+    expect(isUserInitiatedTermination({ ...base, error: "Execution was stopped" })).toBe(true);
+    expect(isUserInitiatedTermination({ ...base, error: "Sandbox crashed" })).toBe(false);
+    expect(isUserInitiatedTermination(base)).toBe(false);
+  });
+
+  it("prefers the explicit reason over the legacy error text", () => {
+    expect(
+      isUserInitiatedTermination({
+        ...base,
+        terminationReason: "sandbox_failure",
+        error: "Execution was stopped",
+      })
+    ).toBe(false);
+  });
+
+  it("is never true for a successful run", () => {
+    expect(
+      isUserInitiatedTermination({ ...base, success: true, terminationReason: "stopped" })
+    ).toBe(false);
   });
 });
 

@@ -124,6 +124,8 @@ export const issueSessionSchema = z.object({
   environmentId: z.string().optional(),
   model: z.string(),
   agentSessionId: z.string().optional(),
+  /** Linear workspace that owns the session; lets revocation purge its mappings. */
+  organizationId: z.string().optional(),
   createdAt: z.number(),
 });
 
@@ -152,6 +154,7 @@ const linearIssueDetailsSchema = z
       .optional(),
     project: linearNameSchema.nullable().optional(),
     assignee: linearNameSchema.nullable().optional(),
+    delegate: linearNameSchema.nullable().optional(),
     team: z.object({ id: z.string(), key: z.string(), name: z.string() }),
     comments: z
       .object({ nodes: z.array(linearCommentSchema) })
@@ -246,3 +249,80 @@ export interface AgentSessionWebhook {
     };
   };
 }
+
+// ─── Additional webhook categories ──────────────────────────────────────────
+//
+// Shapes follow https://linear.app/developers/agent-best-practices. Only the
+// fields the handlers need are required; everything else passes through so a
+// payload change on Linear's side degrades to a logged, ignored event rather
+// than a 400.
+
+const notificationIssueSchema = z
+  .object({
+    id: z.string(),
+    identifier: z.string().optional(),
+    title: z.string().optional(),
+    url: z.string().optional(),
+  })
+  .passthrough();
+
+export const appUserNotificationWebhookSchema = z
+  .object({
+    type: z.literal("AppUserNotification"),
+    /** e.g. issueAssignedToYou, issueUnassignedFromYou, issueCommentMention, issueEmojiReaction */
+    action: z.string(),
+    createdAt: z.string().optional(),
+    organizationId: z.string(),
+    oauthClientId: z.string().optional(),
+    appUserId: z.string(),
+    webhookId: z.string().optional(),
+    notification: z
+      .object({
+        id: z.string().optional(),
+        type: z.string().optional(),
+        issueId: z.string().optional(),
+        issue: notificationIssueSchema.optional(),
+        commentId: z.string().optional(),
+        actorId: z.string().nullable().optional(),
+        actor: z
+          .object({ id: z.string(), name: z.string().optional() })
+          .passthrough()
+          .nullable()
+          .optional(),
+        reactionEmoji: z.string().nullable().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type AppUserNotificationWebhook = z.infer<typeof appUserNotificationWebhookSchema>;
+
+export const permissionChangeWebhookSchema = z
+  .object({
+    type: z.literal("PermissionChange"),
+    action: z.literal("teamAccessChanged"),
+    organizationId: z.string(),
+    oauthClientId: z.string().optional(),
+    appUserId: z.string(),
+    canAccessAllPublicTeams: z.boolean(),
+    addedTeamIds: z.array(z.string()),
+    removedTeamIds: z.array(z.string()),
+    webhookTimestamp: z.number().optional(),
+    webhookId: z.string().optional(),
+  })
+  .passthrough();
+
+export type PermissionChangeWebhook = z.infer<typeof permissionChangeWebhookSchema>;
+
+export const oauthAppWebhookSchema = z
+  .object({
+    type: z.literal("OAuthApp"),
+    action: z.literal("revoked"),
+    organizationId: z.string(),
+    oauthClientId: z.string().optional(),
+    webhookTimestamp: z.number().optional(),
+    webhookId: z.string().optional(),
+  })
+  .passthrough();
+
+export type OAuthAppWebhook = z.infer<typeof oauthAppWebhookSchema>;

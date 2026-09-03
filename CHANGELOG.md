@@ -2,6 +2,21 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 3, 2026
+
+**Linear agent completes its sessions again.** Completion callbacks were rejected by the control
+plane after the RBAC boundary change, so Linear sessions stayed "working" and never showed the
+agent's message; the bots may now read session events and artifacts for completion delivery. The
+repository-suggestions query also used a wrong input type and always failed.
+
+**Linear agent spec compliance.** Stop requests and unassignment now halt in-flight work and always
+end with a confirming activity; ambiguous repositories are offered as selectable options; the agent
+acknowledges every request first and reports unexpected failures instead of going silent; a
+person-initiated session makes the agent the issue delegate; earlier turns are rebuilt from Agent
+Activities; inbox, permission-change, and app-revocation webhooks are handled. Long runs stay alive
+through periodic progress callbacks, finished assistant messages stream into Linear as thoughts, and
+tool calls show their results.
+
 ## August 28, 2026
 
 **Faster long session timelines.** Session timelines now render only visible rows, keeping histories

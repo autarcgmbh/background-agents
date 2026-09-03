@@ -59,8 +59,32 @@ viewer organization must match the webhook organization.
 4. When a human-initiated prompt is dispatched to a live sandbox, the control plane sends a signed
    start callback and the agent moves an eligible issue to the team's lowest-position `started`
    workflow state
-5. Agent emits a `Thought` with the session link while work continues
-6. On completion callback, agent emits `Response` with PR link
+5. Agent emits a `Thought` with the session link while work continues, and (for human-initiated
+   sessions with no delegate) sets itself as the issue delegate
+6. While the message runs the control plane sends `/callbacks/progress`: a `heartbeat` every ~5
+   minutes (the bot emits a throttled ephemeral `Thought` so Linear's 30-minute stale timer never
+   fires) and a `step_finish` whenever an assistant text segment completes (the bot emits it as a
+   `Thought`, which is how intermediate agent messages reach Linear). Tool calls arrive twice per
+   callId — once when they start and once when they finish with a truncated `result`.
+7. On completion callback, agent emits `Response` with the agent's message and PR link. A completion
+   with `terminationReason: "stopped" | "cancelled"` emits nothing: the stop handler already
+   confirmed it.
+
+### Stop and disengagement
+
+A `prompt` activity carrying `signal: "stop"` (or an `issueUnassignedFromYou` inbox notification)
+writes `stop:<agentSessionId>` to KV first, so a new-session or follow-up flow running in another
+invocation aborts at its next checkpoint (a session created moments earlier is stopped and its
+mapping removed). The handler then calls `POST /sessions/:id/stop` and always ends with a `Response`
+(stopped / nothing to stop) or `Error` (stop failed, author unknown), and cancels the remaining plan
+steps. Any other agent-session event clears the marker.
+
+### Other webhook categories
+
+`AppUserNotification` (Inbox notifications), `PermissionChange`, and `OAuthApp` (`revoked`) are
+verified and deduplicated like agent-session events. Revocation deletes the cached runtime token and
+every `issue:*` mapping whose `organizationId` matches; the issue mapping carries `organizationId`
+for this purpose.
 
 ### Callback Context
 

@@ -16,6 +16,16 @@ import { callbacksRouter } from "./callbacks";
 import { createLogger } from "./logger";
 import { resolveAppName } from "@open-inspect/shared/app-name";
 import { handleAgentSessionEvent, escapeHtml } from "./webhook-handler";
+import {
+  handleAppUserNotification,
+  handleOAuthAppRevoked,
+  handlePermissionChange,
+} from "./notification-handler";
+import {
+  appUserNotificationWebhookSchema,
+  oauthAppWebhookSchema,
+  permissionChangeWebhookSchema,
+} from "./types";
 import { isDuplicateEvent } from "./kv-store";
 
 const log = createLogger("handler");
@@ -128,50 +138,107 @@ app.post("/webhook", async (c) => {
   const eventType = readStringField(payload, "type") ?? "unknown";
   const action = readStringField(payload, "action") ?? "unknown";
 
-  if (eventType === "AgentSessionEvent") {
-    if (!isAgentSessionWebhookPayload(payload)) {
-      log.warn("webhook.invalid_payload", {
-        trace_id: traceId,
-        reason: "invalid_agent_session_event_shape",
-      });
-      return c.json({ error: "Invalid payload" }, 400);
-    }
-
-    // Linear's `Linear-Delivery` header is a UUID v4 that uniquely identifies
-    // each delivery. The `webhookId` field in the body is the registered-webhook
-    // configuration ID and is constant across deliveries, so we must not dedup
-    // on it. https://linear.app/developers/webhooks#webhook-payload-details
-    const deliveryId = c.req.header("linear-delivery");
-    if (!deliveryId) {
-      log.warn("webhook.invalid_payload", {
-        trace_id: traceId,
-        reason: "missing_linear_delivery_header",
-      });
-      return c.json({ error: "Missing Linear-Delivery header" }, 400);
-    }
-
-    const isDuplicate = await isDuplicateEvent(c.env, deliveryId);
-    if (isDuplicate) {
-      log.info("webhook.deduplicated", { trace_id: traceId, event_key: deliveryId });
-      return c.json({ ok: true, skipped: true, reason: "duplicate" });
-    }
-
-    c.executionCtx.waitUntil(handleAgentSessionEvent(payload, c.env, traceId));
-
-    log.info("http.request", {
-      trace_id: traceId,
-      http_path: "/webhook",
-      http_status: 200,
-      type: eventType,
-      action,
-      duration_ms: Date.now() - startTime,
-    });
-    return c.json({ ok: true });
+  const handler = resolveWebhookHandler(eventType, payload, traceId);
+  if (!handler) {
+    log.debug("webhook.skipped", { trace_id: traceId, type: eventType, action });
+    return c.json({ ok: true, skipped: true, reason: `unhandled event type: ${eventType}` });
+  }
+  if (handler === "invalid") {
+    return c.json({ error: "Invalid payload" }, 400);
   }
 
-  log.debug("webhook.skipped", { trace_id: traceId, type: eventType, action });
-  return c.json({ ok: true, skipped: true, reason: `unhandled event type: ${eventType}` });
+  // Linear's `Linear-Delivery` header is a UUID v4 that uniquely identifies
+  // each delivery. The `webhookId` field in the body is the registered-webhook
+  // configuration ID and is constant across deliveries, so we must not dedup
+  // on it. https://linear.app/developers/webhooks#webhook-payload-details
+  const deliveryId = c.req.header("linear-delivery");
+  if (!deliveryId) {
+    log.warn("webhook.invalid_payload", {
+      trace_id: traceId,
+      reason: "missing_linear_delivery_header",
+    });
+    return c.json({ error: "Missing Linear-Delivery header" }, 400);
+  }
+
+  const isDuplicate = await isDuplicateEvent(c.env, deliveryId);
+  if (isDuplicate) {
+    log.info("webhook.deduplicated", { trace_id: traceId, event_key: deliveryId });
+    return c.json({ ok: true, skipped: true, reason: "duplicate" });
+  }
+
+  c.executionCtx.waitUntil(handler(c.env));
+
+  log.info("http.request", {
+    trace_id: traceId,
+    http_path: "/webhook",
+    http_status: 200,
+    type: eventType,
+    action,
+    duration_ms: Date.now() - startTime,
+  });
+  return c.json({ ok: true });
 });
+
+/**
+ * Pick the handler for a verified webhook body. Returns null for categories
+ * this worker does not act on and "invalid" for a handled category whose
+ * payload does not have the expected shape.
+ */
+function resolveWebhookHandler(
+  eventType: string,
+  payload: Record<string, unknown>,
+  traceId: string
+): ((env: Env) => Promise<void>) | "invalid" | null {
+  switch (eventType) {
+    case "AgentSessionEvent": {
+      if (!isAgentSessionWebhookPayload(payload)) {
+        log.warn("webhook.invalid_payload", {
+          trace_id: traceId,
+          reason: "invalid_agent_session_event_shape",
+        });
+        return "invalid";
+      }
+      return (env) => handleAgentSessionEvent(payload, env, traceId);
+    }
+    case "AppUserNotification": {
+      const parsed = appUserNotificationWebhookSchema.safeParse(payload);
+      if (!parsed.success) {
+        log.warn("webhook.invalid_payload", {
+          trace_id: traceId,
+          reason: "invalid_notification_shape",
+        });
+        return "invalid";
+      }
+      return (env) => handleAppUserNotification(parsed.data, env, traceId);
+    }
+    case "PermissionChange": {
+      const parsed = permissionChangeWebhookSchema.safeParse(payload);
+      if (!parsed.success) {
+        log.warn("webhook.invalid_payload", {
+          trace_id: traceId,
+          reason: "invalid_permission_change_shape",
+        });
+        return "invalid";
+      }
+      return (env) => handlePermissionChange(parsed.data, env, traceId);
+    }
+    case "OAuthApp": {
+      const parsed = oauthAppWebhookSchema.safeParse(payload);
+      if (!parsed.success) {
+        // Only `revoked` is handled; other OAuthApp actions are not errors.
+        if (readStringField(payload, "action") !== "revoked") return null;
+        log.warn("webhook.invalid_payload", {
+          trace_id: traceId,
+          reason: "invalid_oauth_app_shape",
+        });
+        return "invalid";
+      }
+      return (env) => handleOAuthAppRevoked(parsed.data, env, traceId);
+    }
+    default:
+      return null;
+  }
+}
 
 // Mount callbacks router
 app.route("/callbacks", callbacksRouter);

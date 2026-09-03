@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  EMPTY_ACTIVITY_BODY_FALLBACK,
   emitAgentActivity,
+  fetchAgentSessionActivities,
   fetchIssueDetails,
   fetchUser,
   getRepoSuggestions,
   LINEAR_GRAPHQL_TIMEOUT_MS,
   linearGraphQL,
+  MAX_HISTORY_ACTIVITIES,
   postIssueComment,
 } from "./linear-client";
 import type { LinearApiClient } from "./linear-client";
@@ -287,6 +290,211 @@ describe("fetchIssueDetails", () => {
   });
 });
 
+describe("fetchIssueDetails delegate", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const issue = {
+    id: "issue-1",
+    identifier: "ENG-1",
+    title: "Title",
+    description: null,
+    url: "https://linear.app/acme/issue/ENG-1",
+    priority: 0,
+    priorityLabel: "No priority",
+    labels: { nodes: [] },
+    project: null,
+    assignee: null,
+    team: { id: "team-1", key: "ENG", name: "Engineering" },
+    comments: { nodes: [] },
+  };
+
+  it("requests and returns the issue delegate", async () => {
+    mockFetchResponse({
+      data: { issue: { ...issue, delegate: { id: "app-user-1", name: "Open-Inspect" } } },
+    });
+
+    const details = await fetchIssueDetails(client, "issue-1");
+
+    expect(details?.delegate).toEqual({ id: "app-user-1", name: "Open-Inspect" });
+    const [, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(String(init.body)) as { query: string };
+    expect(body.query).toMatch(/delegate\s*\{\s*id\s+name\s*\}/);
+  });
+
+  it("accepts a null delegate", async () => {
+    mockFetchResponse({ data: { issue: { ...issue, delegate: null } } });
+
+    const details = await fetchIssueDetails(client, "issue-1");
+
+    expect(details).not.toBeNull();
+    expect(details?.delegate).toBeNull();
+  });
+});
+
+describe("fetchAgentSessionActivities", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function node(
+    content: Record<string, unknown>,
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      id: "activity-1",
+      createdAt: "2026-09-03T10:00:00.000Z",
+      ephemeral: false,
+      signal: null,
+      content,
+      ...overrides,
+    };
+  }
+
+  function activitiesResponse(nodes: Array<Record<string, unknown>>) {
+    return { data: { agentSession: { activities: { nodes } } } };
+  }
+
+  it("requests the newest activities of the session", async () => {
+    mockFetchResponse(activitiesResponse([]));
+
+    await fetchAgentSessionActivities(client, "agent-session-1");
+
+    const [, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(String(init.body)) as { query: string; variables: unknown };
+    expect(body.query).toContain("query AgentSessionActivities");
+    expect(body.query).toContain("activities(last: $last, orderBy: createdAt)");
+    expect(body.variables).toEqual({ id: "agent-session-1", last: MAX_HISTORY_ACTIVITIES });
+  });
+
+  it("maps every content type onto a kind and body", async () => {
+    mockFetchResponse(
+      activitiesResponse([
+        node({ __typename: "AgentActivityPromptContent", body: "Fix it" }, { id: "a1" }),
+        node({ __typename: "AgentActivityThoughtContent", body: "Hmm" }, { id: "a2" }),
+        node({ __typename: "AgentActivityElicitationContent", body: "Which?" }, { id: "a3" }),
+        node({ __typename: "AgentActivityResponseContent", body: "Done" }, { id: "a4" }),
+        node({ __typename: "AgentActivityErrorContent", body: "Oops" }, { id: "a5" }),
+      ])
+    );
+
+    const activities = await fetchAgentSessionActivities(client, "agent-session-1");
+
+    expect(activities.map((a) => [a.id, a.kind, a.body])).toEqual([
+      ["a1", "prompt", "Fix it"],
+      ["a2", "thought", "Hmm"],
+      ["a3", "elicitation", "Which?"],
+      ["a4", "response", "Done"],
+      ["a5", "error", "Oops"],
+    ]);
+    expect(activities[0]).toMatchObject({
+      createdAt: "2026-09-03T10:00:00.000Z",
+      ephemeral: false,
+      signal: null,
+    });
+  });
+
+  it("joins action rows from action, parameter and result, skipping blanks", async () => {
+    mockFetchResponse(
+      activitiesResponse([
+        node(
+          {
+            __typename: "AgentActivityActionContent",
+            action: "Run",
+            parameter: "npm test",
+            result: "12 passed",
+          },
+          { id: "a1" }
+        ),
+        node(
+          { __typename: "AgentActivityActionContent", action: "Read", parameter: null },
+          { id: "a2" }
+        ),
+        node({ __typename: "AgentActivityActionContent", action: "Search" }, { id: "a3" }),
+      ])
+    );
+
+    const activities = await fetchAgentSessionActivities(client, "agent-session-1");
+
+    expect(activities.map((a) => [a.kind, a.body])).toEqual([
+      ["action", "Run npm test 12 passed"],
+      ["action", "Read"],
+      ["action", "Search"],
+    ]);
+  });
+
+  it("defaults missing ephemeral and signal fields", async () => {
+    mockFetchResponse(
+      activitiesResponse([
+        node(
+          { __typename: "AgentActivityPromptContent", body: "stop" },
+          { ephemeral: null, signal: "stop" }
+        ),
+        node(
+          { __typename: "AgentActivityThoughtContent", body: "..." },
+          { ephemeral: true, signal: undefined }
+        ),
+      ])
+    );
+
+    const activities = await fetchAgentSessionActivities(client, "agent-session-1");
+
+    expect(activities[0]).toMatchObject({ ephemeral: false, signal: "stop" });
+    expect(activities[1]).toMatchObject({ ephemeral: true, signal: null });
+  });
+
+  it("returns an empty list when the session is missing", async () => {
+    mockFetchResponse({ data: { agentSession: null } });
+
+    await expect(fetchAgentSessionActivities(client, "agent-session-1")).resolves.toEqual([]);
+  });
+
+  it("returns an empty list when the payload is malformed", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockFetchResponse(
+      activitiesResponse([node({ __typename: "AgentActivityUnknownContent", body: "?" })])
+    );
+
+    await expect(fetchAgentSessionActivities(client, "agent-session-1")).resolves.toEqual([]);
+  });
+
+  it("returns an empty list on a GraphQL error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mockFetchResponse({ errors: [{ message: "Entity not found" }] });
+
+    await expect(fetchAgentSessionActivities(client, "agent-session-1")).resolves.toEqual([]);
+  });
+
+  it("returns an empty list on an HTTP failure", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 502 })));
+
+    await expect(fetchAgentSessionActivities(client, "agent-session-1")).resolves.toEqual([]);
+  });
+
+  it("forwards the caller's abort signal", async () => {
+    mockFetchResponse(activitiesResponse([]));
+    const controller = new AbortController();
+
+    await fetchAgentSessionActivities(client, "agent-session-1", controller.signal);
+
+    const [, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
 describe("getRepoSuggestions", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -358,6 +566,91 @@ describe("emitAgentActivity", () => {
         body: "Finished",
       })
     ).resolves.toBe(false);
+  });
+});
+
+describe("emitAgentActivity payload shaping", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function sentInput(): Record<string, unknown> {
+    const [, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(String(init.body)) as { variables: { input: Record<string, unknown> } };
+    return body.variables.input;
+  }
+
+  it("serializes a select signal on an elicitation", async () => {
+    mockFetchResponse({ data: { agentActivityCreate: { success: true } } });
+
+    await emitAgentActivity(
+      client,
+      "agent-session-1",
+      { type: "elicitation", body: "Which repository?" },
+      {
+        signal: {
+          signal: "select",
+          signalMetadata: { options: [{ value: "acme/api" }, { value: "acme/web" }] },
+        },
+      }
+    );
+
+    expect(sentInput()).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "elicitation", body: "Which repository?" },
+      signal: "select",
+      signalMetadata: { options: [{ value: "acme/api" }, { value: "acme/web" }] },
+    });
+  });
+
+  it("drops ephemeral from a response and a signal from a thought", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockFetchResponse({ data: { agentActivityCreate: { success: true } } });
+
+    await emitAgentActivity(
+      client,
+      "agent-session-1",
+      { type: "response", body: "Done" },
+      { ephemeral: true, signal: { signal: "select", signalMetadata: { options: [] } } }
+    );
+
+    expect(sentInput()).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "response", body: "Done" },
+    });
+  });
+
+  it("keeps ephemeral on thoughts and actions", async () => {
+    mockFetchResponse({ data: { agentActivityCreate: { success: true } } });
+
+    await emitAgentActivity(
+      client,
+      "agent-session-1",
+      { type: "action", action: "Run", parameter: "npm test", result: "12 passed" },
+      { ephemeral: true }
+    );
+
+    expect(sentInput()).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "action", action: "Run", parameter: "npm test", result: "12 passed" },
+      ephemeral: true,
+    });
+  });
+
+  it("never sends an empty body", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockFetchResponse({ data: { agentActivityCreate: { success: true } } });
+
+    await emitAgentActivity(client, "agent-session-1", { type: "response", body: "   " });
+
+    expect(sentInput()).toEqual({
+      agentSessionId: "agent-session-1",
+      content: { type: "response", body: EMPTY_ACTIVITY_BODY_FALLBACK },
+    });
   });
 });
 

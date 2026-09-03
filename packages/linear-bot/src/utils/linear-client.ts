@@ -198,12 +198,102 @@ export async function linearGraphQL(
 
 // ─── Agent Activities ────────────────────────────────────────────────────────
 
+/**
+ * The five activity shapes Linear accepts from an agent. Validated server-side;
+ * `action` carries `action`/`parameter` (never `body`), everything else a `body`.
+ */
+export type AgentActivityContent =
+  | { type: "thought"; body: string }
+  | { type: "elicitation"; body: string }
+  | { type: "action"; action: string; parameter: string; result?: string }
+  | { type: "response"; body: string }
+  | { type: "error"; body: string };
+
+/** Agent-to-human signals. Both apply to `elicitation` activities only. */
+export type AgentActivitySignalInput =
+  | {
+      signal: "select";
+      signalMetadata: { options: Array<{ label?: string; value: string }> };
+    }
+  | {
+      signal: "auth";
+      signalMetadata: { url: string; userId?: string; providerName?: string };
+    };
+
+export interface EmitAgentActivityOptions {
+  /** Only `thought` and `action` may be ephemeral; ignored (and logged) otherwise. */
+  ephemeral?: boolean;
+  /** Only `elicitation` may carry a signal; ignored (and logged) otherwise. */
+  signal?: AgentActivitySignalInput;
+}
+
+/**
+ * Body substituted when a caller hands us an empty string. Linear accepts an
+ * empty body but renders nothing, which is indistinguishable from the agent
+ * never having answered — the failure mode behind "stuck in working".
+ */
+export const EMPTY_ACTIVITY_BODY_FALLBACK = "(The agent finished without producing a summary.)";
+
+/**
+ * Coerce an activity into a shape Linear will accept, logging anything dropped.
+ * Exported for tests.
+ */
+export function normalizeAgentActivity(
+  agentSessionId: string,
+  content: AgentActivityContent,
+  options?: EmitAgentActivityOptions
+): {
+  content: AgentActivityContent;
+  ephemeral?: boolean;
+  signal?: AgentActivitySignalInput["signal"];
+  signalMetadata?: AgentActivitySignalInput["signalMetadata"];
+} {
+  let normalized: AgentActivityContent = content;
+  if (content.type !== "action" && content.body.trim().length === 0) {
+    log.warn("linear.emit_activity_invalid", {
+      agent_session_id: agentSessionId,
+      activity_type: content.type,
+      reason: "empty_body",
+    });
+    normalized = { ...content, body: EMPTY_ACTIVITY_BODY_FALLBACK };
+  }
+
+  const canBeEphemeral = content.type === "thought" || content.type === "action";
+  let ephemeral: boolean | undefined = options?.ephemeral;
+  if (ephemeral && !canBeEphemeral) {
+    log.warn("linear.emit_activity_invalid", {
+      agent_session_id: agentSessionId,
+      activity_type: content.type,
+      reason: "ephemeral_not_allowed",
+    });
+    ephemeral = undefined;
+  }
+
+  let signal = options?.signal;
+  if (signal && content.type !== "elicitation") {
+    log.warn("linear.emit_activity_invalid", {
+      agent_session_id: agentSessionId,
+      activity_type: content.type,
+      reason: "signal_not_allowed",
+      signal: signal.signal,
+    });
+    signal = undefined;
+  }
+
+  return {
+    content: normalized,
+    ...(ephemeral ? { ephemeral } : {}),
+    ...(signal ? { signal: signal.signal, signalMetadata: signal.signalMetadata } : {}),
+  };
+}
+
 export async function emitAgentActivity(
   client: LinearApiClient,
   agentSessionId: string,
-  content: Record<string, unknown>,
-  ephemeral?: boolean
+  content: AgentActivityContent,
+  options?: EmitAgentActivityOptions
 ): Promise<boolean> {
+  const normalized = normalizeAgentActivity(agentSessionId, content, options);
   try {
     await linearGraphQL(
       client,
@@ -215,13 +305,14 @@ export async function emitAgentActivity(
       }
     `,
       {
-        input: { agentSessionId, content, ephemeral },
+        input: { agentSessionId, ...normalized },
       }
     );
     return true;
   } catch (err) {
     log.error("linear.emit_activity_failed", {
       agent_session_id: agentSessionId,
+      activity_type: content.type,
       error: err instanceof Error ? err : new Error(String(err)),
     });
     return false;
@@ -253,6 +344,7 @@ export async function fetchIssueDetails(
           labels { nodes { id name } }
           project { id name }
           assignee { id name }
+          delegate { id name }
           team { id key name }
           comments(first: 10, orderBy: createdAt) {
             nodes {
@@ -348,6 +440,144 @@ export async function getRepoSuggestions(
   } catch (err) {
     log.error("linear.repo_suggestions_failed", {
       issue_id: issueId,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    return [];
+  }
+}
+
+// ─── Agent Session Activities ───────────────────────────────────────────────
+
+export type AgentSessionActivityKind =
+  | "prompt"
+  | "response"
+  | "error"
+  | "elicitation"
+  | "thought"
+  | "action";
+
+export interface AgentSessionActivity {
+  id: string;
+  createdAt: string;
+  ephemeral: boolean;
+  signal: string | null;
+  kind: AgentSessionActivityKind;
+  body: string;
+}
+
+/** Newest activities fetched when reconstructing a session's conversation. */
+export const MAX_HISTORY_ACTIVITIES = 50;
+
+const activityContentSchema = z.discriminatedUnion("__typename", [
+  z.object({ __typename: z.literal("AgentActivityPromptContent"), body: z.string() }),
+  z.object({ __typename: z.literal("AgentActivityResponseContent"), body: z.string() }),
+  z.object({ __typename: z.literal("AgentActivityErrorContent"), body: z.string() }),
+  z.object({ __typename: z.literal("AgentActivityElicitationContent"), body: z.string() }),
+  z.object({ __typename: z.literal("AgentActivityThoughtContent"), body: z.string() }),
+  z.object({
+    __typename: z.literal("AgentActivityActionContent"),
+    action: z.string(),
+    parameter: z.string().nullable().optional(),
+    result: z.string().nullable().optional(),
+  }),
+]);
+
+const agentSessionActivitiesResponseSchema = z.object({
+  data: z
+    .object({
+      agentSession: z
+        .object({
+          activities: z.object({
+            nodes: z.array(
+              z.object({
+                id: z.string(),
+                createdAt: z.string(),
+                ephemeral: z.boolean().nullable().optional(),
+                signal: z.string().nullable().optional(),
+                content: activityContentSchema,
+              })
+            ),
+          }),
+        })
+        .nullable()
+        .optional(),
+    })
+    .optional(),
+});
+
+const ACTIVITY_KIND_BY_TYPENAME: Record<string, AgentSessionActivityKind> = {
+  AgentActivityPromptContent: "prompt",
+  AgentActivityResponseContent: "response",
+  AgentActivityErrorContent: "error",
+  AgentActivityElicitationContent: "elicitation",
+  AgentActivityThoughtContent: "thought",
+  AgentActivityActionContent: "action",
+};
+
+/**
+ * Fetch the newest activities of an agent session, oldest first. Linear's
+ * guidance is to rebuild conversations from these frozen snapshots rather
+ * than from editable comments. Returns `[]` on any failure.
+ */
+export async function fetchAgentSessionActivities(
+  client: LinearApiClient,
+  agentSessionId: string,
+  signal?: AbortSignal
+): Promise<AgentSessionActivity[]> {
+  try {
+    const data = await linearGraphQL(
+      client,
+      `
+      query AgentSessionActivities($id: String!, $last: Int!) {
+        agentSession(id: $id) {
+          activities(last: $last, orderBy: createdAt) {
+            nodes {
+              id
+              createdAt
+              ephemeral
+              signal
+              content {
+                __typename
+                ... on AgentActivityPromptContent { body }
+                ... on AgentActivityResponseContent { body }
+                ... on AgentActivityErrorContent { body }
+                ... on AgentActivityElicitationContent { body }
+                ... on AgentActivityThoughtContent { body }
+                ... on AgentActivityActionContent { action parameter result }
+              }
+            }
+          }
+        }
+      }
+    `,
+      { id: agentSessionId, last: MAX_HISTORY_ACTIVITIES },
+      signal
+    );
+
+    const parsed = agentSessionActivitiesResponseSchema.safeParse(data);
+    if (!parsed.success) {
+      log.warn("linear.fetch_activities_malformed", { agent_session_id: agentSessionId });
+      return [];
+    }
+    const nodes = parsed.data.data?.agentSession?.activities.nodes ?? [];
+    return nodes.map((node) => {
+      const content = node.content;
+      const body =
+        content.__typename === "AgentActivityActionContent"
+          ? [content.action, content.parameter, content.result].filter(Boolean).join(" ")
+          : content.body;
+      return {
+        id: node.id,
+        createdAt: node.createdAt,
+        ephemeral: node.ephemeral ?? false,
+        signal: node.signal ?? null,
+        kind: ACTIVITY_KIND_BY_TYPENAME[content.__typename] ?? "thought",
+        body,
+      };
+    });
+  } catch (err) {
+    log.error("linear.fetch_activities_failed", {
+      agent_session_id: agentSessionId,
       error: err instanceof Error ? err : new Error(String(err)),
     });
     return [];

@@ -14,6 +14,9 @@ import { createLogger } from "../logger";
 
 const log = createLogger("extractor");
 
+/** Cap on the agent's final text carried in the Linear `response` activity. */
+export const COMPLETION_TEXT_MAX_CHARS = 6000;
+
 /**
  * Fetch events for a message and aggregate them into a response.
  *
@@ -59,11 +62,12 @@ export function formatAgentResponse(agentResponse: AgentResponse): string {
     if (fileEdits.length > 10) parts.push(`- ... and ${fileEdits.length - 10} more`);
   }
 
-  // Summary text (truncated)
+  // Summary text (truncated). This is the agent's final message to the user,
+  // so keep enough of it to be useful in Linear.
   if (agentResponse.textContent) {
     const summary =
-      agentResponse.textContent.length > 500
-        ? agentResponse.textContent.slice(0, 500) + "..."
+      agentResponse.textContent.length > COMPLETION_TEXT_MAX_CHARS
+        ? agentResponse.textContent.slice(0, COMPLETION_TEXT_MAX_CHARS) + "..."
         : agentResponse.textContent;
     parts.push(`\n${summary}`);
   }

@@ -5,7 +5,13 @@ import {
   resolveStaticTarget,
 } from "../model-resolution";
 import { buildOAuthSuccessHtml } from "../index";
-import { matchExplicitRepo } from "../target-resolution";
+import { cancelPlanFrom, makePlan } from "../plan";
+import {
+  buildRepoSelectOptions,
+  MAX_SELECT_OPTIONS,
+  matchExplicitRepo,
+  SUGGESTION_OPTION_MIN_CONFIDENCE,
+} from "../target-resolution";
 import type { RepoConfig } from "@open-inspect/shared/types/repository-catalog";
 
 describe("buildOAuthSuccessHtml", () => {
@@ -274,5 +280,154 @@ describe("resolveSessionModelSettings", () => {
 
     expect(result.model).toBe("anthropic/claude-opus-4-6");
     expect(result.reasoningEffort).toBe("max");
+  });
+});
+
+// ─── cancelPlanFrom ──────────────────────────────────────────────────────────
+
+describe("cancelPlanFrom", () => {
+  const statuses = (stage: Parameters<typeof cancelPlanFrom>[0]) =>
+    cancelPlanFrom(stage).map((step) => step.status);
+
+  it("cancels every step when nothing had completed", () => {
+    expect(statuses("start")).toEqual(["canceled", "canceled", "canceled", "canceled", "canceled"]);
+  });
+
+  it("keeps completed steps and cancels the rest", () => {
+    expect(statuses("repo_resolved")).toEqual([
+      "completed",
+      "completed",
+      "canceled",
+      "canceled",
+      "canceled",
+    ]);
+    expect(statuses("session_created")).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "canceled",
+      "canceled",
+    ]);
+  });
+
+  it("leaves a fully completed plan unchanged", () => {
+    expect(cancelPlanFrom("completed")).toEqual(makePlan("completed"));
+  });
+
+  it("preserves the step labels and order", () => {
+    expect(cancelPlanFrom("start").map((step) => step.content)).toEqual(
+      makePlan("start").map((step) => step.content)
+    );
+  });
+});
+
+// ─── buildRepoSelectOptions ─────────────────────────────────────────────────
+
+describe("buildRepoSelectOptions", () => {
+  const repo = (owner: string, name: string): RepoConfig => ({
+    id: `${owner}/${name}`,
+    owner,
+    name,
+    fullName: `${owner}/${name}`,
+    displayName: name,
+    description: name,
+    defaultBranch: "main",
+    private: true,
+  });
+  const backend = repo("acme", "backend");
+  const frontend = repo("acme", "frontend");
+  const infra = repo("acme", "infra");
+  const docs = repo("acme", "docs");
+  const repos = [backend, frontend, infra, docs];
+
+  it("orders confident Linear suggestions first, then the classifier pick, then alternatives", () => {
+    expect(
+      buildRepoSelectOptions({
+        classified: infra,
+        alternatives: [docs],
+        suggestions: [
+          { repositoryFullName: "acme/backend", confidence: 0.6 },
+          { repositoryFullName: "acme/frontend", confidence: 0.9 },
+        ],
+        repos,
+      })
+    ).toEqual([
+      { value: "acme/frontend" },
+      { value: "acme/backend" },
+      { value: "acme/infra" },
+      { value: "acme/docs" },
+    ]);
+  });
+
+  it("drops suggestions below the confidence threshold", () => {
+    expect(
+      buildRepoSelectOptions({
+        classified: null,
+        alternatives: [],
+        suggestions: [
+          { repositoryFullName: "acme/backend", confidence: SUGGESTION_OPTION_MIN_CONFIDENCE },
+          {
+            repositoryFullName: "acme/frontend",
+            confidence: SUGGESTION_OPTION_MIN_CONFIDENCE - 0.01,
+          },
+        ],
+        repos,
+      })
+    ).toEqual([{ value: "acme/backend" }]);
+  });
+
+  it("dedupes case-insensitively and returns the launchable spelling", () => {
+    expect(
+      buildRepoSelectOptions({
+        classified: backend,
+        alternatives: [backend, frontend],
+        suggestions: [{ repositoryFullName: "Acme/Backend", confidence: 0.8 }],
+        repos,
+      })
+    ).toEqual([{ value: "acme/backend" }, { value: "acme/frontend" }]);
+  });
+
+  it("offers only repositories that can be launched", () => {
+    expect(
+      buildRepoSelectOptions({
+        classified: repo("other", "unknown"),
+        alternatives: [repo("acme", "retired")],
+        suggestions: [{ repositoryFullName: "acme/archived", confidence: 0.95 }],
+        repos: [backend],
+      })
+    ).toEqual([]);
+  });
+
+  it("caps the list at MAX_SELECT_OPTIONS", () => {
+    const many = Array.from({ length: MAX_SELECT_OPTIONS + 4 }, (_, i) =>
+      repo("acme", `repo-${i}`)
+    );
+
+    const options = buildRepoSelectOptions({
+      classified: null,
+      alternatives: many,
+      suggestions: [],
+      repos: many,
+    });
+
+    expect(options).toHaveLength(MAX_SELECT_OPTIONS);
+    expect(options[0]).toEqual({ value: "acme/repo-0" });
+  });
+
+  it("emits values only — Linear renders the repository name itself", () => {
+    const [option] = buildRepoSelectOptions({
+      classified: backend,
+      alternatives: [],
+      suggestions: [],
+      repos,
+    });
+
+    expect(Object.keys(option)).toEqual(["value"]);
+  });
+
+  it("returns nothing when there is no candidate at all", () => {
+    expect(
+      buildRepoSelectOptions({ classified: null, alternatives: [], suggestions: [], repos })
+    ).toEqual([]);
   });
 });
