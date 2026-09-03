@@ -54,6 +54,21 @@ const linearGraphQLResponseSchema = z
   })
   .passthrough();
 
+/**
+ * Best-effort extraction of the first GraphQL error message from a non-OK
+ * response so validation failures (HTTP 400) are diagnosable from logs.
+ */
+async function readGraphQLErrorDetail(res: Response): Promise<string | null> {
+  try {
+    const parsed = linearGraphQLResponseSchema.safeParse(await res.json());
+    if (!parsed.success) return null;
+    const message = parsed.data.errors?.[0]?.message;
+    return message ? message.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── OAuth Helpers ───────────────────────────────────────────────────────────
 
 export function buildOAuthAuthorizeUrl(env: Env): string {
@@ -163,7 +178,8 @@ export async function linearGraphQL(
   }
 
   if (!res.ok) {
-    throw new Error(`Linear API error: ${res.status}`);
+    const detail = await readGraphQLErrorDetail(res);
+    throw new Error(`Linear API error: ${res.status}${detail ? ` (${detail})` : ""}`);
   }
 
   const parsed = linearGraphQLResponseSchema.safeParse(await res.json());
@@ -309,7 +325,7 @@ export async function getRepoSuggestions(
     const data = await linearGraphQL(
       client,
       `
-      query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [IssueRepositorySuggestionInput!]!) {
+      query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [CandidateRepository!]!) {
         issueRepositorySuggestions(
           issueId: $issueId
           agentSessionId: $agentSessionId

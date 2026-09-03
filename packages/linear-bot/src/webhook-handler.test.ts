@@ -528,7 +528,7 @@ describe("handleAgentSessionEvent environment targets", () => {
     );
   });
 
-  it("omits actor identity and issue transition for an automation-created session", async () => {
+  it("acts as the installed app user and skips the issue transition for an automation-created session", async () => {
     const { kv } = createFakeKV({
       "oauth:client-credentials:org-1": validToken(),
       "config:project-repos": JSON.stringify({
@@ -542,7 +542,20 @@ describe("handleAgentSessionEvent environment targets", () => {
 
     await handleAgentSessionEvent(webhook, env, "trace-automation");
 
+    // No human identity is attached to the session...
     expect(createSessionBody(fetchMock)).not.toHaveProperty("actorUserId");
+    expect(createSessionBody(fetchMock)).not.toHaveProperty("actorDisplayName");
+    // ...but the control plane still receives an actor (the app user) for create and prompt.
+    const createCall = fetchMock.mock.calls.find(
+      ([input]) => String(input) === "https://internal/sessions"
+    );
+    const promptCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/prompt"));
+    expect(new Headers(createCall?.[1]?.headers).get("X-OpenInspect-Actor")).toBe(
+      "linear:app-user-1"
+    );
+    expect(new Headers(promptCall?.[1]?.headers).get("X-OpenInspect-Actor")).toBe(
+      "linear:app-user-1"
+    );
     expect(promptBody(fetchMock)).toMatchObject({
       callbackContext: { transitionIssueOnStart: false },
     });

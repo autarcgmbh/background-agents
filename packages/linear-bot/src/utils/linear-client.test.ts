@@ -48,6 +48,39 @@ describe("linearGraphQL", () => {
     );
   });
 
+  it("includes the GraphQL error message when the API rejects the request", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: () =>
+          Promise.resolve({
+            errors: [{ message: 'Unknown type "IssueRepositorySuggestionInput".' }],
+          }),
+      })
+    );
+
+    await expect(linearGraphQL(client, "query { viewer { id } }", {})).rejects.toThrow(
+      'Linear API error: 400 (Unknown type "IssueRepositorySuggestionInput".)'
+    );
+  });
+
+  it("reports a bare status when a rejected response has no GraphQL body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: () => Promise.reject(new Error("not json")),
+      })
+    );
+
+    await expect(linearGraphQL(client, "query { viewer { id } }", {})).rejects.toThrow(
+      "Linear API error: 502"
+    );
+  });
+
   it("returns the envelope for a well-formed GraphQL response", async () => {
     mockFetchResponse({ data: { viewer: { id: "user-1" } } });
 
@@ -271,6 +304,27 @@ describe("getRepoSuggestions", () => {
     await expect(getRepoSuggestions(client, "issue-1", "agent-1", [])).resolves.toEqual([
       { repositoryFullName: "acme/api", confidence: 0.92 },
     ]);
+  });
+
+  it("declares the candidateRepositories variable with Linear's CandidateRepository input type", async () => {
+    mockFetchResponse({ data: { issueRepositorySuggestions: { suggestions: [] } } });
+
+    await getRepoSuggestions(client, "issue-1", "agent-1", [
+      { hostname: "github.com", repositoryFullName: "acme/api" },
+    ]);
+
+    const [, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(String(init.body)) as { query: string; variables: unknown };
+    expect(body.query).toContain("$candidateRepositories: [CandidateRepository!]!");
+    expect(body.query).not.toContain("IssueRepositorySuggestionInput");
+    expect(body.variables).toEqual({
+      issueId: "issue-1",
+      agentSessionId: "agent-1",
+      candidateRepositories: [{ hostname: "github.com", repositoryFullName: "acme/api" }],
+    });
   });
 
   it("returns an empty list when suggestions are null", async () => {
