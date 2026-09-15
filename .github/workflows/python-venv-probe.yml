@@ -1,0 +1,14 @@
+name: Python venv probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reproduce image Python layout and test venv creation
+        run: |
+          docker run --rm -v "$PWD:/probe:ro" python:3.12-slim-bookworm bash /probe/scripts/python-venv-probe.sh
