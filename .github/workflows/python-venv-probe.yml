@@ -1,6 +1,9 @@
 name: Python venv probe
 on:
   workflow_dispatch:
+  push:
+    branches: [t3code/fix-image-loading-failure]
+    paths: [scripts/python-venv-probe.sh, .github/workflows/python-venv-probe.yml]
 permissions:
   contents: read
 jobs:
