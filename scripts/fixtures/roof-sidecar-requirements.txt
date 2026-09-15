@@ -1,0 +1,24 @@
+# Pinned; matches the versions the pipeline was verified against.
+requests==2.32.3
+pyproj==3.7.1
+shapely==2.1.1
+numpy==2.3.1
+laspy==2.5.4
+lazrs==0.7.0          # LAZ backend for laspy (handoff gotcha 8)
+inflate64==1.0.4      # Deflate64 (ZIP method 9) — Berlin's ALS archives; stdlib
+                      # zipfile raises on it and raw zlib returns garbage
+trimesh==4.6.8
+scipy==1.15.3         # trimesh needs it to bake per-face colours into GLB/OBJ
+mapbox-earcut==1.0.3  # polygon triangulation (also what `cjio export` needs, gotcha 5)
+cjio==0.9.0           # optional CityJSON exporter/inspector
+matplotlib==3.10.3    # preview renders (Agg backend, no display required)
+pytest==8.4.1
+
+# --- M1 service (FastAPI sidecar) -------------------------------------------
+fastapi==0.140.13
+PyYAML==6.0.2         # benchmark golden-scenario files (benchmark/)
+uvicorn==0.51.0
+pydantic==2.13.4
+boto3==1.43.57        # R2/S3 artifact upload (optional at runtime)
+rasterio==1.5.0       # DSM GeoTIFF reading/reprojection (Google-DSM fallback)
+httpx==0.28.1         # FastAPI TestClient transport (tests only)

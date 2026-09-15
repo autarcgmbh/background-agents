@@ -18,7 +18,13 @@ echo "CURRENT_VENV_EXIT=$current_result"
 set -e
 uv venv --seed --python 3.12 /tmp/fixed-venv
 /tmp/fixed-venv/bin/python -m pip --version
-/tmp/fixed-venv/bin/python -m pip install --quiet pyproj
+/tmp/fixed-venv/bin/python -m pip install --quiet -r /probe/scripts/fixtures/roof-sidecar-requirements.txt
 /tmp/fixed-venv/bin/python -c 'import pyproj; print("PROJECTION_RESULT",pyproj.Transformer.from_crs(4326,3857,always_xy=True).transform(13.4,52.5))'
 /tmp/fixed-venv/bin/python -m pyproj sync --file uk_os_OSTN15_NTv2_OSGBtoETRS.tif
 printf 'FIXED_VENV_VALIDATED\n'
+/tmp/fixed-venv/bin/python -m pip check
+/tmp/fixed-venv/bin/python -c 'import requests, pyproj, shapely, numpy, laspy, lazrs, inflate64, trimesh, scipy, mapbox_earcut, cjio, matplotlib, fastapi, yaml, uvicorn, pydantic, boto3, rasterio, httpx; print("ALL_ROOF_SIDECAR_IMPORTS_PASSED")'
+base_python="$(python3.12 -c 'import os,sys; print(os.path.realpath(sys._base_executable))')"
+"$base_python" -m venv /tmp/realpath-venv
+/tmp/realpath-venv/bin/python -m pip --version
+printf 'REALPATH_VENV_VALIDATED\n'
