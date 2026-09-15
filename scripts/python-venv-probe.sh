@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+apt-get install -y -qq --no-install-recommends curl ca-certificates libexpat1 >/dev/null
 mkdir -p /opt/openinspect/uv
 curl -fsSL https://github.com/astral-sh/uv/releases/download/0.9.7/uv-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /opt/openinspect/uv --strip-components=1
 export UV_PYTHON_INSTALL_DIR=/opt/openinspect/python-downloads
