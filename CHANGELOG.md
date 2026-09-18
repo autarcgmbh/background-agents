@@ -4,6 +4,15 @@ New features, integrations, and notable improvements to Open-Inspect — newest 
 
 ## September 18, 2026
 
+**Cost per session.** Analytics now values every session's tokens at published list prices, so a
+session running on a connected Claude or ChatGPT subscription is finally comparable to an API-billed
+one — the provider reports no cost for a seat, which had left the cost column reading zero for real
+work. The per-session table gains a sortable **Token cost** column; selecting a value breaks it down
+by model, splitting input, output and cache tokens, which price up to 50x apart. The runtime now
+reports which model spent each step's tokens, so a thread that burned Opus on a trivial task is
+visible as such. Models with no published rate are shown as unpriced and their totals marked as a
+lower bound rather than silently counted as free.
+
 **Upstream merge.** Brings in the Claude Agent SDK harness, sandbox boot phases, OpenCode Go models,
 and the AWS control-plane deploy. Two fork-specific reconciliations: provider accounts keep Kirk's
 seat identity (`external_principal_id`) on top of upstream's nullable account identity and identity

@@ -5,6 +5,12 @@ import {
   type LinearProgressPhase,
 } from "@open-inspect/shared/types/session-api";
 import {
+  EMPTY_MODEL_TOKEN_USAGE,
+  UNATTRIBUTED_MODEL_ID,
+  totalTokens,
+  type ModelTokenUsage,
+} from "@open-inspect/shared/model-pricing";
+import {
   eventTimelineCursorFromRow,
   type EventListCursor,
   type EventTimelineCursor,
@@ -98,7 +104,7 @@ export class EventRepository {
   recordStepUsage(event: Extract<SandboxEvent, { type: "step_finish" }>, now: number): void {
     // Without a stable part ID, repeated updates cannot be distinguished from
     // new steps. Leave older runtimes unreported rather than inflate their usage.
-    if (!event.stepId || totalReportedTokens(event.tokens) === null) return;
+    if (!event.stepId || reportedTokenComponents(event.tokens) === null) return;
     const id = `step_finish:${JSON.stringify([event.messageId, event.childSessionId ?? "", event.stepId])}`;
     this.sql.exec(
       `INSERT INTO events (id, type, data, message_id, created_at, timeline_sequence)
@@ -113,16 +119,41 @@ export class EventRepository {
 
   /** Null means no token usage was reported, which is different from zero. */
   getTotalTokens(): number | null {
+    const usage = this.getUsageByModel();
+    return usage ? usage.reduce((sum, entry) => sum + totalTokens(entry.usage), 0) : null;
+  }
+
+  /**
+   * Reported usage split by the model that spent it, for cost attribution.
+   * Null when nothing was reported, which is different from an empty split.
+   *
+   * Steps whose model the runtime did not name are pooled under
+   * `UNATTRIBUTED_MODEL_ID`, so their tokens still count toward the session
+   * total but are never priced.
+   */
+  getUsageByModel(): Array<{ modelId: string; usage: ModelTokenUsage }> | null {
     const rows = this.sql
       .exec("SELECT data FROM events WHERE type = 'step_finish'")
       .toArray() as Array<{ data: string }>;
-    let total: number | null = null;
+    const byModel = new Map<string, ModelTokenUsage>();
+    let reported = false;
     for (const row of rows) {
-      const usage = parseEventData(row.data)?.tokens;
-      const count = totalReportedTokens(usage);
-      if (count !== null) total = (total ?? 0) + count;
+      const event = parseEventData(row.data);
+      const components = reportedTokenComponents(event?.tokens);
+      if (!components) continue;
+      reported = true;
+      const modelId =
+        typeof event?.model === "string" && event.model ? event.model : UNATTRIBUTED_MODEL_ID;
+      const current = byModel.get(modelId) ?? { ...EMPTY_MODEL_TOKEN_USAGE };
+      current.input += components.input;
+      current.output += components.output;
+      current.cacheRead += components.cacheRead;
+      current.cacheWrite += components.cacheWrite;
+      current.reasoning += components.reasoning;
+      byModel.set(modelId, current);
     }
-    return total;
+    if (!reported) return null;
+    return [...byModel].map(([modelId, usage]) => ({ modelId, usage }));
   }
 
   createContextCompactionEvent(data: CreateEventData & { messageId: string }): void {
@@ -305,21 +336,41 @@ export class EventRepository {
   }
 }
 
-function totalReportedTokens(usage: unknown): number | null {
+/**
+ * Split one reported usage into billable components, or null when the runtime
+ * reported nothing usable.
+ *
+ * A runtime that reports only a bare total (or a `total` field) gives no way to
+ * tell input from output, which price an order of magnitude apart. Such a total
+ * is carried in `input` purely so the token count stays right: it only reaches
+ * a price if its model is priced, and a step that vague never names one, so it
+ * lands in the unattributed bucket and is excluded from cost either way.
+ */
+function reportedTokenComponents(usage: unknown): ModelTokenUsage | null {
   const valid = (value: unknown): value is number =>
     typeof value === "number" && Number.isFinite(value) && value >= 0;
-  if (valid(usage)) return usage;
+  const count = (value: unknown): number => (valid(value) ? value : 0);
+  if (valid(usage)) return { ...EMPTY_MODEL_TOKEN_USAGE, input: usage };
   if (typeof usage !== "object" || usage === null) return null;
   const details = usage as Record<string, unknown>;
-  if (valid(details.total)) return details.total;
   const cache = details.cache as Record<string, unknown> | undefined;
   // OpenCode reports uncached input, output, reasoning, and cache separately.
-  const counts = [
-    details.input,
-    details.output,
-    details.reasoning,
-    cache?.read,
-    cache?.write,
-  ].filter(valid);
-  return counts.length ? counts.reduce((sum, count) => sum + count, 0) : null;
+  const components: ModelTokenUsage = {
+    input: count(details.input),
+    output: count(details.output),
+    reasoning: count(details.reasoning),
+    cacheRead: count(cache?.read),
+    cacheWrite: count(cache?.write),
+  };
+  if (
+    valid(details.input) ||
+    valid(details.output) ||
+    valid(details.reasoning) ||
+    valid(cache?.read) ||
+    valid(cache?.write)
+  ) {
+    return components;
+  }
+  if (valid(details.total)) return { ...EMPTY_MODEL_TOKEN_USAGE, input: details.total };
+  return null;
 }

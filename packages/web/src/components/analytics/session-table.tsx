@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
 import type { AnalyticsBreakdownEntry } from "@open-inspect/shared/types/analytics";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatAnalyticsCount, formatAnalyticsDuration } from "@/lib/analytics";
 import { formatSessionCost } from "@/lib/session-cost";
+import { ModelUsageBreakdown } from "@/components/analytics/model-usage-breakdown";
 import { formatRelativeTime } from "@/lib/time";
 
 const PAGE_SIZE = 25;
@@ -15,6 +16,7 @@ const columns = [
   ["user", "User"],
   ["status", "Status"],
   ["totalTokens", "Tokens"],
+  ["computedCostUsd", "Token cost"],
   ["messageCount", "Messages"],
   ["cost", "Reported cost"],
   ["avgDuration", "Active duration"],
@@ -33,9 +35,19 @@ export function AnalyticsSessionTable({
   const [sortKey, setSortKey] = useState<SortKey>("lastActive");
   const [ascending, setAscending] = useState(false);
   const [page, setPage] = useState(0);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const rows = useMemo(
+    () =>
+      (entries ?? []).map((entry) => ({
+        ...entry,
+        // Null sorts last: "not reported" is not "cheapest".
+        computedCostUsd: entry.computedCost?.costUsd ?? null,
+      })),
+    [entries]
+  );
   const filtered = useMemo(() => {
     const search = query.trim().toLowerCase();
-    return (entries ?? [])
+    return rows
       .filter((entry) =>
         [entry.key, entry.displayName, entry.repository, entry.user].some((value) =>
           value?.toLowerCase().includes(search)
@@ -51,7 +63,7 @@ export function AnalyticsSessionTable({
             : String(left).localeCompare(String(right));
         return (ascending ? comparison : -comparison) || a.key.localeCompare(b.key);
       });
-  }, [entries, query, sortKey, ascending]);
+  }, [rows, query, sortKey, ascending]);
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / PAGE_SIZE) - 1));
   const visible = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
@@ -118,41 +130,62 @@ export function AnalyticsSessionTable({
             </thead>
             <tbody>
               {visible.map((entry) => (
-                <tr
-                  key={entry.key}
-                  className="border-b border-border-muted last:border-b-0 hover:bg-muted/50"
-                >
-                  <td className="px-5 py-4 min-w-60 max-w-sm">
-                    <Link
-                      href={`/session/${encodeURIComponent(entry.key)}`}
-                      className="font-medium text-accent hover:underline break-words"
-                    >
-                      {entry.displayName ?? entry.key}
-                    </Link>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      {entry.repository ?? "No repository"}
-                    </div>
-                  </td>
-                  <td className="px-5 py-4">{entry.user ?? "Unknown user"}</td>
-                  <td className="px-5 py-4 capitalize">{entry.status}</td>
-                  <td className="px-5 py-4 text-right">
-                    {entry.totalTokens == null ? (
-                      <span className="text-muted-foreground">Not reported</span>
-                    ) : (
-                      formatAnalyticsCount(entry.totalTokens)
-                    )}
-                  </td>
-                  <td className="px-5 py-4 text-right">
-                    {formatAnalyticsCount(entry.messageCount)}
-                  </td>
-                  <td className="px-5 py-4 text-right">{formatSessionCost(entry.cost)}</td>
-                  <td className="px-5 py-4 text-right">
-                    {formatAnalyticsDuration(entry.avgDuration)}
-                  </td>
-                  <td className="px-5 py-4 text-right text-muted-foreground whitespace-nowrap">
-                    {formatRelativeTime(entry.lastActive)}
-                  </td>
-                </tr>
+                <Fragment key={entry.key}>
+                  <tr className="border-b border-border-muted last:border-b-0 hover:bg-muted/50">
+                    <td className="px-5 py-4 min-w-60 max-w-sm">
+                      <Link
+                        href={`/session/${encodeURIComponent(entry.key)}`}
+                        className="font-medium text-accent hover:underline break-words"
+                      >
+                        {entry.displayName ?? entry.key}
+                      </Link>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {entry.repository ?? "No repository"}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">{entry.user ?? "Unknown user"}</td>
+                    <td className="px-5 py-4 capitalize">{entry.status}</td>
+                    <td className="px-5 py-4 text-right">
+                      {entry.totalTokens == null ? (
+                        <span className="text-muted-foreground">Not reported</span>
+                      ) : (
+                        formatAnalyticsCount(entry.totalTokens)
+                      )}
+                    </td>
+                    <td className="px-5 py-4 text-right">
+                      {entry.computedCost ? (
+                        <button
+                          type="button"
+                          className="font-medium text-accent hover:underline"
+                          aria-expanded={expanded === entry.key}
+                          onClick={() => setExpanded(expanded === entry.key ? null : entry.key)}
+                        >
+                          {formatSessionCost(entry.computedCost.costUsd)}
+                          {entry.computedCost.hasUnpricedModels ? "+" : ""}
+                        </button>
+                      ) : (
+                        <span className="text-muted-foreground">Not reported</span>
+                      )}
+                    </td>
+                    <td className="px-5 py-4 text-right">
+                      {formatAnalyticsCount(entry.messageCount)}
+                    </td>
+                    <td className="px-5 py-4 text-right">{formatSessionCost(entry.cost)}</td>
+                    <td className="px-5 py-4 text-right">
+                      {formatAnalyticsDuration(entry.avgDuration)}
+                    </td>
+                    <td className="px-5 py-4 text-right text-muted-foreground whitespace-nowrap">
+                      {formatRelativeTime(entry.lastActive)}
+                    </td>
+                  </tr>
+                  {expanded === entry.key && entry.computedCost && (
+                    <tr className="border-b border-border-muted bg-muted/30">
+                      <td colSpan={columns.length} className="px-5 py-3">
+                        <ModelUsageBreakdown cost={entry.computedCost} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -160,8 +193,10 @@ export function AnalyticsSessionTable({
       )}
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border-muted px-5 py-3 text-xs text-muted-foreground">
         <p>
-          Token counts are available for newly recorded turns. Unreported usage does not mean zero
-          usage.
+          Token cost values the tokens at published list prices — select one to see the split by
+          model. It is not a bill: sessions on a subscription seat are never charged per request,
+          which is why the provider reports no cost for them. A trailing + marks a total that
+          excludes a model with no list price.
         </p>
         {filtered.length > PAGE_SIZE && (
           <div className="flex items-center gap-2">

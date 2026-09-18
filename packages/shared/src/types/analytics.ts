@@ -18,8 +18,11 @@ export interface AnalyticsStatusBreakdown {
 export interface AnalyticsSummaryResponse {
   totalSessions: number;
   activeUsers: number;
+  /** Cost the providers reported. Zero for sessions billed to a seat. */
   totalCost: number;
   avgCost: number;
+  /** List-price value of every session's tokens in the window. */
+  computedCost?: AnalyticsComputedCost;
   totalPrs: number;
   statusBreakdown: AnalyticsStatusBreakdown;
 }
@@ -33,6 +36,35 @@ export interface AnalyticsTimeseriesResponse {
   series: AnalyticsTimeseriesPoint[];
 }
 
+/** One model's share of a bucket's token spend, priced at list rates. */
+export interface AnalyticsModelUsageEntry {
+  /** Catalog id, or `unattributed` for usage no model could be attributed to. */
+  modelId: string;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Null when the model has no published rate. */
+  costUsd: number | null;
+}
+
+/**
+ * What a bucket's reported tokens are worth at list prices.
+ *
+ * This is not an invoice. Sessions on a subscription seat are never billed
+ * per request, so the provider reports no cost for them; valuing their tokens
+ * is the only way to compare them against API-billed work.
+ */
+export interface AnalyticsComputedCost {
+  /** Σ of the priced models. A lower bound when `hasUnpricedModels` is set. */
+  costUsd: number;
+  /** True when some usage ran on a model with no published rate. */
+  hasUnpricedModels: boolean;
+  /** Per model, most expensive first. */
+  models: AnalyticsModelUsageEntry[];
+}
+
 export interface AnalyticsBreakdownEntry {
   key: string;
   displayName?: string;
@@ -42,6 +74,11 @@ export interface AnalyticsBreakdownEntry {
   status?: string;
   /** Null when usage has not been reported; omitted by older servers. */
   totalTokens?: number | null;
+  /**
+   * List-price value of this bucket's tokens. Absent when the bucket reported
+   * no usage at all, which is different from a computed cost of zero.
+   */
+  computedCost?: AnalyticsComputedCost;
   sessions: number;
   completed: number;
   failed: number;

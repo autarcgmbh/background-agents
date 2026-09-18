@@ -36,7 +36,7 @@ describe("AnalyticsSessionTable", () => {
       />
     );
     expect(screen.getByText("12,000")).toBeInTheDocument();
-    expect(screen.getByText("Not reported")).toBeInTheDocument();
+    expect(screen.getAllByText("Not reported").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "known" })).toHaveAttribute("href", "/session/known");
     fireEvent.click(screen.getByRole("button", { name: "Tokens" }));
     expect(within(screen.getAllByRole("row")[1]).getByRole("link")).toHaveTextContent("known");
@@ -44,6 +44,98 @@ describe("AnalyticsSessionTable", () => {
       target: { value: "unknown" },
     });
     expect(screen.queryByRole("link", { name: "known" })).not.toBeInTheDocument();
+  });
+
+  it("values a seat-billed thread's tokens and breaks the cost down by model", () => {
+    const priced: AnalyticsBreakdownEntry = {
+      ...entry("seat", 1_100_000),
+      computedCost: {
+        costUsd: 7.5,
+        hasUnpricedModels: false,
+        models: [
+          {
+            modelId: "anthropic/claude-opus-5",
+            totalTokens: 1_100_000,
+            inputTokens: 1_000_000,
+            outputTokens: 100_000,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: 7.5,
+          },
+        ],
+      },
+    };
+    render(<AnalyticsSessionTable entries={[priced]} loading={false} />);
+
+    // The provider reported nothing for a seat; the token cost is the real signal.
+    const costButton = screen.getByRole("button", { name: "$7.50" });
+    expect(screen.getByText("$0.0")).toBeInTheDocument();
+
+    expect(screen.queryByText("Claude Opus 5")).not.toBeInTheDocument();
+    fireEvent.click(costButton);
+    expect(screen.getByText("Claude Opus 5")).toBeInTheDocument();
+    expect(screen.getByText("1,000,000")).toBeInTheDocument();
+    expect(screen.getByText("100,000")).toBeInTheDocument();
+
+    fireEvent.click(costButton);
+    expect(screen.queryByText("Claude Opus 5")).not.toBeInTheDocument();
+  });
+
+  it("marks a total that excludes an unpriced model rather than understating it silently", () => {
+    const mixed: AnalyticsBreakdownEntry = {
+      ...entry("mixed", 2_000_000),
+      computedCost: {
+        costUsd: 1,
+        hasUnpricedModels: true,
+        models: [
+          {
+            modelId: "anthropic/claude-haiku-4-5",
+            totalTokens: 1_000_000,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: 1,
+          },
+          {
+            modelId: "opencode/glm-5",
+            totalTokens: 1_000_000,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: null,
+          },
+        ],
+      },
+    };
+    render(<AnalyticsSessionTable entries={[mixed]} loading={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "$1.00+" }));
+    expect(screen.getByText("No list price")).toBeInTheDocument();
+    expect(screen.getByText(/lower bound/)).toBeInTheDocument();
+  });
+
+  it("sorts unpriced threads last, since unknown cost is not the cheapest", () => {
+    const withCost = (key: string, costUsd: number | null): AnalyticsBreakdownEntry => ({
+      ...entry(key, 1000),
+      ...(costUsd === null
+        ? {}
+        : { computedCost: { costUsd, hasUnpricedModels: false, models: [] } }),
+    });
+    render(
+      <AnalyticsSessionTable
+        entries={[withCost("cheap", 1), withCost("none", null), withCost("dear", 9)]}
+        loading={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Token cost" }));
+    const names = screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).queryByRole("link")?.textContent);
+    expect(names).toEqual(["dear", "cheap", "none"]);
   });
 
   it("pages through every session", () => {

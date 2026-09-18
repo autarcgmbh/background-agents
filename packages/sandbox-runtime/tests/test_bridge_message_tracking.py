@@ -182,6 +182,48 @@ class TestHandlePartTranslation:
             }
         ]
 
+    def test_step_finish_names_the_model_that_spent_the_tokens(self, bridge: AgentBridge):
+        """Cost analytics prices per model, so usage must carry its model id."""
+        stream = bridge.harness.prompt_stream
+        state = make_state("cp-message-123")
+        stream._on_message_updated(
+            state,
+            {
+                "info": {
+                    "id": "oc-assistant-1",
+                    "sessionID": "oc-session-123",
+                    "role": "assistant",
+                    "parentID": "msg_test",
+                    "providerID": "anthropic",
+                    "modelID": "claude-opus-5",
+                }
+            },
+        )
+
+        events = stream._handle_part(
+            state,
+            {
+                "type": "step-finish",
+                "id": "step-1",
+                "messageID": "oc-assistant-1",
+                "tokens": {"input": 100, "output": 20},
+            },
+            None,
+        )
+
+        assert events[0]["model"] == "anthropic/claude-opus-5"
+
+    def test_step_finish_omits_the_model_when_none_was_announced(self, bridge: AgentBridge):
+        """Better unattributed than attributed to the wrong model."""
+        stream = bridge.harness.prompt_stream
+        events = stream._handle_part(
+            make_state("cp-message-123"),
+            {"type": "step-finish", "id": "step-1", "messageID": "unseen", "tokens": 150},
+            None,
+        )
+
+        assert "model" not in events[0]
+
     def test_step_finish_omits_unknown_cost(self, bridge: AgentBridge):
         stream = bridge.harness.prompt_stream
         events = stream._handle_part(

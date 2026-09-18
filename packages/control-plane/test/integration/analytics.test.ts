@@ -121,6 +121,160 @@ describe("Analytics API", () => {
     expect(snapshot.breakdowns.user.entries[0].totalTokens).toBe(12500);
   });
 
+  it("prices a seat-billed session's tokens, which the provider reports as free", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now() - 1000;
+    await seedSession(store, {
+      id: "seat-session",
+      repoOwner: "acme",
+      repoName: "repo",
+      scmLogin: "alice",
+      userId: "user-alice",
+      status: "completed",
+      createdAt: now,
+      updatedAt: now,
+      totalCost: 0,
+      activeDurationMs: 5000,
+      messageCount: 2,
+      prCount: 0,
+    });
+    // A Claude Max seat: the runtime reports no cost, so total_cost stays 0
+    // while a million Opus input tokens were genuinely spent.
+    await store.updateMetrics("seat-session", {
+      totalCost: 0,
+      totalTokens: 1_100_000,
+      usageByModel: [
+        {
+          modelId: "anthropic/claude-opus-5",
+          usage: {
+            input: 1_000_000,
+            output: 100_000,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+          },
+        },
+      ],
+      activeDurationMs: 5000,
+      messageCount: 2,
+      prCount: 0,
+    });
+
+    const dashboard = await serviceFetch("https://test.local/analytics/dashboard?days=7");
+    const snapshot = await dashboard.json<AnalyticsDashboardResponse>();
+    const session = snapshot.breakdowns.session.entries.find(
+      (entry) => entry.key === "seat-session"
+    );
+    // $5/MTok input + $25/MTok output = $5.00 + $2.50.
+    expect(session?.cost).toBe(0);
+    expect(session?.computedCost?.costUsd).toBeCloseTo(7.5);
+    expect(session?.computedCost?.hasUnpricedModels).toBe(false);
+    expect(session?.computedCost?.models).toEqual([
+      {
+        modelId: "anthropic/claude-opus-5",
+        totalTokens: 1_100_000,
+        inputTokens: 1_000_000,
+        outputTokens: 100_000,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 7.5,
+      },
+    ]);
+    // The same spend rolls up to the user, repo, and window totals.
+    expect(snapshot.breakdowns.user.entries[0].computedCost?.costUsd).toBeCloseTo(7.5);
+    expect(snapshot.breakdowns.repository.entries[0].computedCost?.costUsd).toBeCloseTo(7.5);
+    expect(snapshot.summary.computedCost?.costUsd).toBeCloseTo(7.5);
+    expect(snapshot.summary.totalCost).toBe(0);
+  });
+
+  it("flags a window whose cost excludes an unpriced model", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now() - 1000;
+    await seedSession(store, {
+      id: "mixed-session",
+      repoOwner: "acme",
+      repoName: "repo",
+      scmLogin: "alice",
+      status: "completed",
+      createdAt: now,
+      updatedAt: now,
+      totalCost: 0,
+      activeDurationMs: 5000,
+      messageCount: 2,
+      prCount: 0,
+    });
+    await store.updateMetrics("mixed-session", {
+      totalCost: 0,
+      totalTokens: 2_000_000,
+      usageByModel: [
+        {
+          modelId: "anthropic/claude-haiku-4-5",
+          usage: { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        },
+        {
+          modelId: "opencode/glm-5",
+          usage: { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        },
+      ],
+      activeDurationMs: 5000,
+      messageCount: 2,
+      prCount: 0,
+    });
+
+    const dashboard = await serviceFetch("https://test.local/analytics/dashboard?days=7");
+    const snapshot = await dashboard.json<AnalyticsDashboardResponse>();
+    const cost = snapshot.summary.computedCost;
+    // Only the Haiku million is priced; the total is explicitly a lower bound.
+    expect(cost?.costUsd).toBeCloseTo(1);
+    expect(cost?.hasUnpricedModels).toBe(true);
+    expect(cost?.models.map((model) => model.costUsd)).toEqual([1, null]);
+  });
+
+  it("replaces a session's model split rather than accumulating into it", async () => {
+    const store = new SessionIndexStore(env.DB);
+    const now = Date.now() - 1000;
+    await seedSession(store, {
+      id: "rollup-session",
+      repoOwner: "acme",
+      repoName: "repo",
+      scmLogin: "alice",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      totalCost: 0,
+      activeDurationMs: 1000,
+      messageCount: 1,
+      prCount: 0,
+    });
+    const metrics = {
+      totalCost: 0,
+      activeDurationMs: 1000,
+      messageCount: 1,
+      prCount: 0,
+    };
+    const usage = (input: number) => ({
+      input,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+    });
+    // Each rollup reports the session's cumulative usage, so a later one must
+    // replace the earlier rows, never add to them.
+    await store.updateMetrics("rollup-session", {
+      ...metrics,
+      usageByModel: [{ modelId: "anthropic/claude-opus-5", usage: usage(1_000_000) }],
+    });
+    await store.updateMetrics("rollup-session", {
+      ...metrics,
+      usageByModel: [{ modelId: "anthropic/claude-opus-5", usage: usage(2_000_000) }],
+    });
+
+    const dashboard = await serviceFetch("https://test.local/analytics/dashboard?days=7");
+    const snapshot = await dashboard.json<AnalyticsDashboardResponse>();
+    expect(snapshot.summary.computedCost?.costUsd).toBeCloseTo(10);
+  });
+
   it("returns one coherently-windowed dashboard snapshot", async () => {
     const before = Date.now();
     const response = await serviceFetch("https://test.local/analytics/dashboard?days=7");

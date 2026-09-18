@@ -156,6 +156,12 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     tokens: tokenUsageSchema.optional(),
     /** Stable runtime part ID, used to deduplicate usage reports. */
     stepId: z.string().optional(),
+    /**
+     * Catalog id (`provider/model`) of the model that spent these tokens.
+     * Absent on older runtimes, and on a step whose model could not be
+     * attributed; such usage is counted but cannot be priced.
+     */
+    model: z.string().optional(),
     reason: z.string().optional(),
     isSubtask: z.boolean().optional(),
     childSessionId: z.string().optional(),

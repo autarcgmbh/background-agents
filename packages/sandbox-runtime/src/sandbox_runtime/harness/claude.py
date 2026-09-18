@@ -157,6 +157,10 @@ class _TurnState:
     # None: the previous turn reported no running total, so the next total
     # cannot be split between the two turns.
     cost_baseline: float | None
+    # Catalog id of the model running this turn, reported with its usage so
+    # cost analytics can price the tokens. Every Claude-harness turn runs one
+    # model, unlike OpenCode where a subagent may run another.
+    model_id: str = ""
     texts: list[_MessageText] = field(default_factory=list)
     last_token_content: str = ""
     tool_names: dict[str, str] = field(default_factory=dict)
@@ -499,7 +503,11 @@ class ClaudeHarness:
             return TurnOutcome.failed(f"Claude agent failed to start: {error}")
 
         self._interrupted = False
-        state = _TurnState(message_id=prompt.message_id, cost_baseline=self._cost_baseline)
+        state = _TurnState(
+            message_id=prompt.message_id,
+            cost_baseline=self._cost_baseline,
+            model_id=f"anthropic/{model}",
+        )
         try:
             async with asyncio.timeout_at(deadline):
                 await client.query(self._user_messages(prompt))
@@ -787,6 +795,8 @@ class ClaudeHarness:
             tokens = _usage_tokens(message.usage)
             if tokens:
                 finish["tokens"] = tokens
+            if state.model_id:
+                finish["model"] = state.model_id
             events.append(finish)
             if self._interrupted:
                 return events, TurnOutcome(

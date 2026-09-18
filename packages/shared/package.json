@@ -22,6 +22,10 @@
       "import": "./dist/models.js",
       "types": "./dist/models.d.ts"
     },
+    "./model-pricing": {
+      "import": "./dist/model-pricing.js",
+      "types": "./dist/model-pricing.d.ts"
+    },
     "./harnesses": {
       "import": "./dist/harnesses.js",
       "types": "./dist/harnesses.d.ts"

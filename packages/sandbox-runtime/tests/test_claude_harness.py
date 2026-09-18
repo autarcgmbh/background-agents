@@ -635,6 +635,36 @@ class TestTranslation:
         assert len([e for e in events if e["type"] == "step_finish"]) == 1
 
 
+class TestUsageAttribution:
+    """Usage carries its model so cost analytics can price it."""
+
+    @pytest.mark.asyncio
+    async def test_step_finish_names_the_turn_model(self, tmp_path: Path) -> None:
+        h = Harness(
+            tmp_path,
+            turns=[[_result(0.10, usage={"input_tokens": 100, "output_tokens": 20})]],
+        )
+        await h.harness.open()
+        await h.harness.create_session()
+        events, _ = await _run(
+            h.harness, HarnessPrompt(message_id="m1", text="a", model="anthropic/claude-opus-5")
+        )
+
+        finish = next(e for e in events if e["type"] == "step_finish")
+        assert finish["model"] == "anthropic/claude-opus-5"
+        assert finish["tokens"] == {"input": 100, "output": 20}
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_the_configured_default_model(self, tmp_path: Path) -> None:
+        h = Harness(tmp_path, turns=[[_result(0.10, usage={"input_tokens": 1})]])
+        await h.harness.open()
+        await h.harness.create_session()
+        events, _ = await _run(h.harness, HarnessPrompt(message_id="m1", text="a"))
+
+        finish = next(e for e in events if e["type"] == "step_finish")
+        assert finish["model"] == "anthropic/claude-sonnet-4-6"
+
+
 class TestCostBaseline:
     """§5.3: messageCostUsd = running total at turn end - baseline."""
 

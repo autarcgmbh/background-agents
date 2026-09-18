@@ -69,6 +69,10 @@ class _PromptState:
     pending_drop_logged: bool = False
     child_activity: ChildActivityCorrelator = field(default_factory=ChildActivityCorrelator)
     emitted_error_messages: set[str] = field(default_factory=set)
+    # Model id (``provider/model``) per OpenCode assistant message id. A
+    # step-finish names only its message, but cost analytics has to attribute
+    # the tokens to a model, and a subagent may run a different one.
+    message_models: dict[str, str] = field(default_factory=dict)
     # Priced step costs keyed by OpenCode part id. Last write wins, so a part
     # OpenCode re-emits with a corrected cost replaces its earlier value.
     step_costs: dict[str, float] = field(default_factory=dict)
@@ -415,6 +419,12 @@ class OpenCodePromptStream:
 
             events: list[dict[str, Any]] = []
             if role == "assistant" and oc_msg_id:
+                model_id = info.get("modelID")
+                provider_id = info.get("providerID")
+                if model_id:
+                    state.message_models[oc_msg_id] = (
+                        f"{provider_id}/{model_id}" if provider_id else str(model_id)
+                    )
                 disposition = state.attribution.assistant_disposition(
                     oc_msg_id,
                     parent_id,
@@ -675,6 +685,9 @@ class OpenCodePromptStream:
             }
             if part.get("id"):
                 finish_event["stepId"] = part["id"]
+            model_id = state.message_models.get(part.get("messageID", ""))
+            if model_id:
+                finish_event["model"] = model_id
             if cost is not None:
                 finish_event["cost"] = cost
             events.append(finish_event)
