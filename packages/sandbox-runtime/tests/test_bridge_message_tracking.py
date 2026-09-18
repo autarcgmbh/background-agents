@@ -213,6 +213,38 @@ class TestHandlePartTranslation:
 
         assert events[0]["model"] == "anthropic/claude-opus-5"
 
+    def test_subagent_usage_is_attributed_to_its_own_model(self, bridge: AgentBridge):
+        """A subagent runs in its own OpenCode session on a possibly different
+        model, but its tokens are still this session's spend."""
+        stream = bridge.harness.prompt_stream
+        state = make_state("cp-message-123")
+        stream._on_message_updated(
+            state,
+            {
+                "info": {
+                    "id": "oc-child-1",
+                    "sessionID": "oc-child-session",
+                    "role": "assistant",
+                    "providerID": "openai",
+                    "modelID": "gpt-5.6-luna",
+                }
+            },
+        )
+
+        events = stream._handle_part(
+            state,
+            {
+                "type": "step-finish",
+                "id": "step-1",
+                "messageID": "oc-child-1",
+                "tokens": {"input": 10, "output": 2},
+            },
+            None,
+            is_subtask=True,
+        )
+
+        assert events[0]["model"] == "openai/gpt-5.6-luna"
+
     def test_step_finish_omits_the_model_when_none_was_announced(self, bridge: AgentBridge):
         """Better unattributed than attributed to the wrong model."""
         stream = bridge.harness.prompt_stream
