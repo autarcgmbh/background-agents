@@ -41,6 +41,16 @@ function anthropic(input: number, output: number, cacheRead?: number): ModelPric
 }
 
 /**
+ * OpenAI quotes cached input outright rather than as a multiple of input, so
+ * `cacheRead` is passed explicitly. Cache writes carry the same 1.25x premium
+ * as Anthropic's, and like Anthropic's they replace the input rate for those
+ * tokens rather than adding to it.
+ */
+function openai(input: number, output: number, cacheRead: number): ModelPricing {
+  return { input, output, cacheRead, cacheWrite: input * CACHE_WRITE_MULTIPLIER };
+}
+
+/**
  * Keyed by the catalog model id (`provider/model`).
  *
  * Deliberately partial. A model is listed only where we hold a published rate;
@@ -60,6 +70,22 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
   "anthropic/claude-sonnet-5": anthropic(2, 10),
   "anthropic/claude-sonnet-4-6": anthropic(3, 15),
   "anthropic/claude-haiku-4-5": anthropic(1, 5),
+
+  // OpenAI standard processing rates. gpt-5.3-codex-spark is deliberately
+  // absent: it is in our catalog but not on OpenAI's pricing page, so it stays
+  // unpriced until a rate is published.
+  //
+  // GPT-6 Astra also has a long-context tier — a request over 272K input
+  // tokens is billed at $20/$75 rather than $10/$50. Not modelled here: the
+  // per-request token counts that tier depends on are not retained, so a
+  // session that crossed it is valued slightly low.
+  "openai/gpt-6-astra": openai(10, 50, 1),
+  "openai/gpt-5.6-sol": openai(4, 20, 0.4),
+  "openai/gpt-5.6-terra": openai(2, 12, 0.2),
+  "openai/gpt-5.6-luna": openai(0.2, 1.2, 0.02),
+  "openai/gpt-5.5": openai(5, 30, 0.5),
+  "openai/gpt-5.4": openai(2.5, 15, 0.25),
+  "openai/gpt-5.3-codex": openai(1.75, 14, 0.175),
 };
 
 /**

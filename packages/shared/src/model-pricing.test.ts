@@ -44,6 +44,25 @@ describe("model pricing", () => {
     );
   });
 
+  it("prices OpenAI models at their standard rates", () => {
+    expect(usageCostUsd(usage({ input: 1_000_000 }), "openai/gpt-6-astra")).toBe(10);
+    expect(usageCostUsd(usage({ output: 1_000_000 }), "openai/gpt-6-astra")).toBe(50);
+    expect(usageCostUsd(usage({ input: 1_000_000 }), "openai/gpt-5.6-luna")).toBeCloseTo(0.2);
+    expect(usageCostUsd(usage({ output: 1_000_000 }), "openai/gpt-5.3-codex")).toBe(14);
+  });
+
+  it("uses OpenAI's quoted cached-input rate and its 1.25x cache-write premium", () => {
+    expect(usageCostUsd(usage({ cacheRead: 1_000_000 }), "openai/gpt-5.6-sol")).toBeCloseTo(0.4);
+    expect(usageCostUsd(usage({ cacheWrite: 1_000_000 }), "openai/gpt-5.6-sol")).toBeCloseTo(5);
+    // GPT-6 Astra: $10 input, $1 cached, $12.50 cache write, $50 output.
+    expect(usageCostUsd(usage({ cacheRead: 1_000_000 }), "openai/gpt-6-astra")).toBeCloseTo(1);
+    expect(usageCostUsd(usage({ cacheWrite: 1_000_000 }), "openai/gpt-6-astra")).toBeCloseTo(12.5);
+  });
+
+  it("leaves a catalog model OpenAI publishes no rate for unpriced", () => {
+    expect(pricingFor("openai/gpt-5.3-codex-spark")).toBeNull();
+  });
+
   it("reports an unpriced model as null, which is not zero", () => {
     expect(pricingFor("opencode/glm-5")).toBeNull();
     expect(usageCostUsd(usage({ input: 10_000_000 }), "opencode/glm-5")).toBeNull();
