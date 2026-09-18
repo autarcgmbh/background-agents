@@ -391,6 +391,17 @@ class OpenCodePromptStream:
         info = props.get("info", {})
         msg_session_id = info.get("sessionID")
 
+        # Before the parent-session filter on purpose. A subagent runs in its
+        # own OpenCode session and may run a different model, but its steps are
+        # still this session's spend, so its usage has to be attributable too.
+        # Keyed by message id, which is unique across sessions.
+        if info.get("role") == "assistant" and info.get("id") and info.get("modelID"):
+            provider_id = info.get("providerID")
+            model_id = info["modelID"]
+            state.message_models[info["id"]] = (
+                f"{provider_id}/{model_id}" if provider_id else str(model_id)
+            )
+
         if msg_session_id == state.opencode_session_id:
             oc_msg_id = info.get("id", "")
             parent_id = info.get("parentID", "")
@@ -419,12 +430,6 @@ class OpenCodePromptStream:
 
             events: list[dict[str, Any]] = []
             if role == "assistant" and oc_msg_id:
-                model_id = info.get("modelID")
-                provider_id = info.get("providerID")
-                if model_id:
-                    state.message_models[oc_msg_id] = (
-                        f"{provider_id}/{model_id}" if provider_id else str(model_id)
-                    )
                 disposition = state.attribution.assistant_disposition(
                     oc_msg_id,
                     parent_id,
