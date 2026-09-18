@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
   -- that bill them. Kept for display; never priced again.
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, model_id)
-) WITHOUT ROWID;
+);
 
 -- The analytics breakdown reads every model row for the sessions in a window,
 -- so the session_id prefix of the primary key already serves it. This index
