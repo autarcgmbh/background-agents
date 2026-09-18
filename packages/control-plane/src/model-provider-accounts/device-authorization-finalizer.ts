@@ -24,6 +24,15 @@ export class ProviderDeviceAuthorizationFinalizer {
     private readonly generateAccountId: () => string
   ) {}
 
+  /**
+   * Persist a connection the provider itself vouched for. Identity-bound
+   * providers converge on the external account id: a create that lands on a
+   * known identity reconnects it, and a reconnect must present the target's
+   * identity. Identity-less connections (the adapter accepts a missing id)
+   * name a fresh slot on create and write straight to the target on reconnect.
+   * A slot that has no identity yet adopts the first one a connection names,
+   * unless that identity already has a slot, so no identity ever holds two.
+   */
   async finalizeTrustedConnection(
     transaction: ProcessingProviderAuthorization,
     connection: ProviderConnectionResult<unknown>,
@@ -31,7 +40,6 @@ export class ProviderDeviceAuthorizationFinalizer {
     now: number
   ): Promise<boolean> {
     const identity = connection.externalAccountId;
-    if (!identity) throw new Error("Provider account identity could not be verified");
     const seat = connection.externalPrincipalId ?? null;
 
     if (transaction.operation === "reconnect") {
@@ -40,7 +48,24 @@ export class ProviderDeviceAuthorizationFinalizer {
       if (!account || account.archivedAt !== null || account.provider !== transaction.provider) {
         throw new Error("Provider account is unavailable for reconnection");
       }
-      if (!account.externalAccountId || account.externalAccountId !== identity) {
+      if (identity === undefined) {
+        adapter.validateExternalIdentity(
+          { externalAccountId: identity, externalPrincipalId: seat ?? undefined },
+          account
+        );
+        if (account.externalAccountId !== null) {
+          throw new Error("Provider account identity could not be verified");
+        }
+      } else if (account.externalAccountId === null) {
+        // The slot was created without an identity (a pasted setup token);
+        // this connection names one, and the slot adopts it. The unique
+        // identity index refuses the write if another slot took it meanwhile.
+        const holder = await this.resolveConnectTarget(transaction.provider, identity, seat);
+        if (holder) {
+          throw new Error("Provider account identity is already connected to another account");
+        }
+        return this.reconnect(transaction, snapshot, connection, adapter, now, identity);
+      } else if (account.externalAccountId !== identity) {
         throw new Error("Provider account identity did not match");
       }
       // On a subscription with many seats the account id above matches for every member, so
@@ -49,6 +74,18 @@ export class ProviderDeviceAuthorizationFinalizer {
         throw new Error("Provider account identity did not match");
       }
       return this.reconnect(transaction, snapshot, connection, adapter, now);
+    }
+
+    if (identity === undefined) {
+      adapter.validateExternalIdentity(
+        { externalAccountId: identity, externalPrincipalId: seat ?? undefined },
+        { externalAccountId: null, externalPrincipalId: null }
+      );
+      const outcome = await this.create(transaction, connection, adapter, null, seat, now);
+      if (outcome === "identity_conflict") {
+        throw new Error("Identity-less provider account reported an identity conflict");
+      }
+      return outcome === "created";
     }
 
     const existing = await this.resolveConnectTarget(transaction.provider, identity, seat);
@@ -99,7 +136,7 @@ export class ProviderDeviceAuthorizationFinalizer {
     transaction: ProcessingProviderAuthorization & { operation: "create" },
     connection: ProviderConnectionResult<unknown>,
     adapter: ModelProviderAccountAdapter<unknown, unknown>,
-    identity: string,
+    identity: string | null,
     seat: string | null,
     now: number
   ): Promise<"created" | "identity_conflict" | "claim_lost"> {
@@ -124,13 +161,15 @@ export class ProviderDeviceAuthorizationFinalizer {
     snapshot: ModelProviderAccountLifecycleSnapshot,
     connection: ProviderConnectionResult<unknown>,
     adapter: ModelProviderAccountAdapter<unknown, unknown>,
-    now: number
+    now: number,
+    adoptedExternalAccountId: string | null = null
   ): Promise<boolean> {
     const { account } = snapshot;
     const outcome = await this.writer.finalizeDeviceAuthorizationReconnect({
       authorization: transaction,
       accountId: account.id,
-      externalAccountId: account.externalAccountId!,
+      expectedExternalAccountId: account.externalAccountId,
+      externalAccountId: adoptedExternalAccountId ?? account.externalAccountId,
       externalPrincipalId: connection.externalPrincipalId ?? null,
       credential: connection.credential,
       credentialSchemaVersion: adapter.credentialSchemaVersion,

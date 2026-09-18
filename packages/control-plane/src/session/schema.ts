@@ -69,10 +69,12 @@ CREATE TABLE IF NOT EXISTS session (
   branch_name TEXT,                                 -- Working branch (set after first commit)
   base_sha TEXT,                                    -- SHA of base branch at session start
   current_sha TEXT,                                 -- Current HEAD SHA
-  opencode_session_id TEXT,                         -- OpenCode session ID (for 1:1 mapping)
+  agent_session_id TEXT,                            -- The agent's own conversation id (1:1 mapping)
+  harness TEXT NOT NULL DEFAULT 'opencode',         -- Agent harness: 'opencode' | 'claude'; fixed at create
   model TEXT DEFAULT 'anthropic/claude-haiku-4-5',   -- LLM model to use
   reasoning_effort TEXT,                            -- Session-level reasoning effort default
   status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'failed', 'archived', 'cancelled'
+  status_revision INTEGER NOT NULL DEFAULT 1,
   parent_session_id TEXT,                           -- Parent session ID (NULL for top-level)
   spawn_source TEXT NOT NULL DEFAULT 'user',        -- 'user' or 'agent'
   spawn_depth INTEGER NOT NULL DEFAULT 0,           -- 0 for top-level, parent.depth + 1 for children
@@ -194,6 +196,9 @@ CREATE TABLE IF NOT EXISTS sandbox (
   ttyd_url TEXT,                                    -- ttyd proxy tunnel URL
   ttyd_token TEXT,                                  -- Encrypted JWT token for ttyd auth
   active_socket_id TEXT,                            -- Bridge socket the session dispatches to (socket:<id> tag)
+  boot_phase TEXT,                                  -- JSON SandboxBootPhase the runtime last reported; NULL once ready
+  boot_seq INTEGER,                                 -- Sequence of that report, for de-duplicating resends
+  fenced INTEGER NOT NULL DEFAULT 0,                -- 1 once the generation's credentials were revoked for good (boot budget)
   created_at INTEGER NOT NULL
 );
 
@@ -232,6 +237,7 @@ CREATE TABLE IF NOT EXISTS ws_client_mapping (
 const INDEXES_SQL = `
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created_at_id ON messages(created_at DESC, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_request_id
 ON messages(client_request_id) WHERE client_request_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_one_processing
@@ -680,6 +686,38 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
       // Kirk deployed progress_notified_at as migration 47; upstream used 47 for projections.
       runMigration(sql, "ALTER TABLE messages ADD COLUMN progress_notified_at INTEGER");
       sql.exec(TERMINAL_MESSAGE_PROJECTION_TABLE_SQL);
+    },
+  },
+  // Kirk claimed id 50 before these landed upstream (where they are 50-52), so
+  // they are renumbered here. Ids are recorded in _schema_migrations and must
+  // never be reused for different statements.
+  {
+    id: 51,
+    description: "Add session harness and rename opencode_session_id to agent_session_id",
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE session ADD COLUMN harness TEXT NOT NULL DEFAULT 'opencode'`);
+      // A fresh DO already created agent_session_id through SCHEMA_SQL, so the
+      // legacy column is absent there; only an existing DO has it to rename.
+      try {
+        sql.exec(`ALTER TABLE session RENAME COLUMN opencode_session_id TO agent_session_id`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!msg.includes("no such column") && !msg.includes("duplicate column")) throw e;
+      }
+    },
+  },
+  {
+    id: 52,
+    description: "Fence session status projections independently of activity",
+    run: `ALTER TABLE session ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 1`,
+  },
+  {
+    id: 53,
+    description: "Add sandbox boot phase, boot sequence and generation fence",
+    run: (sql) => {
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN boot_phase TEXT`);
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN boot_seq INTEGER`);
+      runMigration(sql, `ALTER TABLE sandbox ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0`);
     },
   },
 ];

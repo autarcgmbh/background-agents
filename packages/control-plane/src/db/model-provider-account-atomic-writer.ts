@@ -71,7 +71,9 @@ export interface CreateAccountWithCredentialInput {
 
 interface DeviceAuthorizationCredentialInput {
   authorization: ProcessingProviderAuthorization;
-  externalAccountId: string;
+  /** Null for providers whose credential carries no account identity. */
+  externalAccountId: string | null;
+  /** The seat within the account; null when the provider names no seat. */
   externalPrincipalId: string | null;
   credential: unknown;
   credentialSchemaVersion: number;
@@ -88,6 +90,12 @@ export interface FinalizeDeviceAuthorizationCreateInput extends DeviceAuthorizat
 
 export interface FinalizeDeviceAuthorizationReconnectInput extends DeviceAuthorizationCredentialInput {
   accountId: string;
+  /**
+   * The identity the target holds now; the write is fenced on it. `externalAccountId`
+   * is what the target holds afterwards: the same value, or an identity a
+   * previously identity-less slot adopts from this authorization.
+   */
+  expectedExternalAccountId: string | null;
 }
 
 export type DeviceAuthorizationCreateOutcome =
@@ -228,7 +236,7 @@ export class D1ModelProviderAccountAtomicWriter implements ModelProviderAccountA
              access_token_expires_at, updated_at)
            SELECT ?, ?, ?, ?, ? WHERE changes() = 1
              AND EXISTS (SELECT 1 FROM model_provider_accounts
-               WHERE id = ? AND provider = ? AND external_account_id = ?
+               WHERE id = ? AND provider = ? AND external_account_id IS ?
                  AND status = 'active' AND archived_at IS NULL AND lifecycle_version = 0)`
         )
         .bind(
@@ -263,11 +271,14 @@ export class D1ModelProviderAccountAtomicWriter implements ModelProviderAccountA
     if (!(await this.ownsDeviceAuthorizationClaim(input.authorization, input.now))) {
       return { type: "claim_lost" };
     }
-    const conflict = await this.accounts.findLifecycleSnapshotByExternalIdentity(
-      input.authorization.provider,
-      input.externalAccountId,
-      input.externalPrincipalId
-    );
+    const conflict =
+      input.externalAccountId === null
+        ? null
+        : await this.accounts.findLifecycleSnapshotByExternalIdentity(
+            input.authorization.provider,
+            input.externalAccountId,
+            input.externalPrincipalId
+          );
     if (conflict) return { type: "identity_conflict" };
     throw new Error("Provider authorization create finalization rejected without a conflict");
   }
@@ -283,7 +294,7 @@ export class D1ModelProviderAccountAtomicWriter implements ModelProviderAccountA
       !snapshot ||
       snapshot.account.archivedAt !== null ||
       snapshot.account.provider !== input.authorization.provider ||
-      snapshot.account.externalAccountId !== input.externalAccountId ||
+      snapshot.account.externalAccountId !== input.expectedExternalAccountId ||
       !seatAdoptable(snapshot.account.externalPrincipalId, input.externalPrincipalId) ||
       (input.authorization.operation === "create" && snapshot.account.status === "disabled") ||
       (input.authorization.operation === "reconnect" &&
@@ -308,23 +319,25 @@ export class D1ModelProviderAccountAtomicWriter implements ModelProviderAccountA
       this.db
         .prepare(
           `UPDATE model_provider_accounts
-           SET status = 'active', external_principal_id = ?, updated_by = ?, last_verified_at = ?,
+           SET status = 'active', external_account_id = ?, external_principal_id = ?,
+               updated_by = ?, last_verified_at = ?,
                updated_at = ?, lifecycle_version = lifecycle_version + 1
-           WHERE id = ? AND provider = ? AND external_account_id = ?
-             AND (external_principal_id IS NULL OR external_principal_id = ?)
+           WHERE id = ? AND provider = ? AND external_account_id IS ?
+             AND (external_principal_id IS NULL OR external_principal_id IS ?)
              AND archived_at IS NULL AND status = ? AND lifecycle_version = ?
              AND EXISTS (${authorizationGuard})
              AND EXISTS (SELECT 1 FROM model_provider_account_credentials
                WHERE provider_account_id = ? AND credential_version = ?)`
         )
         .bind(
+          input.externalAccountId,
           input.externalPrincipalId,
           input.authorization.userId,
           input.now,
           input.now,
           input.accountId,
           input.authorization.provider,
-          input.externalAccountId,
+          input.expectedExternalAccountId,
           input.externalPrincipalId,
           snapshot.account.status,
           snapshot.lifecycleVersion,

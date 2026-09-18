@@ -40,9 +40,7 @@ function account(overrides: Partial<ModelProviderAccount> = {}): ModelProviderAc
   };
 }
 
-function state(
-  overrides: Partial<ProviderCredentialState<Credential>> = {}
-): ProviderCredentialState<Credential> {
+function state(overrides: Partial<ProviderCredentialState> = {}): ProviderCredentialState {
   return {
     payload: { refreshToken: "refresh" },
     credentialSchemaVersion: 1,
@@ -104,7 +102,7 @@ function adapter(
 function setup(
   options: {
     providerAccount?: ModelProviderAccount | null;
-    credentialStates?: Array<ProviderCredentialState<Credential> | null>;
+    credentialStates?: Array<ProviderCredentialState | null>;
     refresh?: ModelProviderAccountAdapter<Credential, never>["refresh"];
     tryBegin?: ModelProviderAccountBrokerStores["credentials"]["tryBeginExchange"];
     complete?: ModelProviderAccountBrokerStores["credentials"]["completeExchange"];

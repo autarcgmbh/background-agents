@@ -71,7 +71,10 @@ export class SessionSandboxEventProcessor {
         this.runtime.handleSessionTitle(event);
         return;
       case "ready":
-        this.runtime.handleReady(event, context);
+        await this.runtime.handleReady(event, context);
+        return;
+      case "boot_progress":
+        this.runtime.handleBootProgress(event, context);
         return;
       case "git_sync":
         this.runtime.handleGitSync(event, context);
@@ -109,6 +112,11 @@ export class SessionSandboxEventProcessor {
       case "user_message":
         // Timeline-observer events: persist and broadcast, nothing else.
         this.streaming.recordTimelineEvent(event, context);
+        return;
+      case "snapshot_ready":
+        // The bridge's answer to the snapshot command. The lifecycle manager
+        // drives the snapshot itself through the provider; all this needs is
+        // the delivery ack below, which stops the bridge re-sending it.
         return;
       default:
         // Exhaustive: a new SandboxEvent variant must pick a family here.

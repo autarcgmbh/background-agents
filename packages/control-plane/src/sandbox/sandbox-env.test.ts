@@ -26,6 +26,7 @@ const baseInput = {
   sessionId: "session-123",
   repoOwner: "testowner",
   repoName: "testrepo",
+  harness: "opencode" as const,
   provider: "anthropic",
   model: "anthropic/claude-sonnet-4-5",
 };
@@ -38,11 +39,20 @@ describe("buildSessionConfig", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
       mcp_servers: mcpServers,
       branch: "feature/x",
+      bridge_early_connect: true,
     });
+  });
+
+  it("asks every runtime to connect its bridge ahead of the repository boot", () => {
+    // Set unconditionally: a runtime that predates the flag ignores it and
+    // boots in its old order, and only a control plane that treats the ready
+    // event (not the socket) as readiness may ask for it.
+    expect(buildSessionConfig(baseInput).bridge_early_connect).toBe(true);
   });
 
   it("omits branch when not provided", () => {
@@ -108,8 +118,10 @@ describe("buildSessionConfig", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
+      bridge_early_connect: true,
     });
     expect(parsed).not.toHaveProperty("mcp_servers");
   });
@@ -158,6 +170,7 @@ describe("buildSandboxEnvVars", () => {
     repoName: "testrepo",
     controlPlaneUrl: "https://control-plane.test",
     sandboxAuthToken: "auth-token-abc",
+    harness: "opencode" as const,
     provider: "anthropic",
     model: "anthropic/claude-sonnet-4-5",
   };
@@ -185,8 +198,10 @@ describe("buildSandboxEnvVars", () => {
       session_id: "session-123",
       repo_owner: "testowner",
       repo_name: "testrepo",
+      harness: "opencode",
       provider: "anthropic",
       model: "anthropic/claude-sonnet-4-5",
+      bridge_early_connect: true,
     });
     // No embedded git tokens — the sandbox brokers credentials per-request.
     expect(envVars).not.toHaveProperty("VCS_CLONE_TOKEN");

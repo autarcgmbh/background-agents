@@ -2,6 +2,7 @@
  * Session-specific type definitions.
  */
 
+import type { HarnessId } from "@open-inspect/shared/harnesses";
 import type { ResolvedSessionAttachment } from "@open-inspect/shared/types/session-attachments";
 import type {
   SessionStatus,
@@ -44,10 +45,12 @@ export interface SessionRow {
   branch_name: string | null;
   base_sha: string | null;
   current_sha: string | null;
-  opencode_session_id: string | null;
+  agent_session_id: string | null; // The agent's own conversation id
+  harness: HarnessId; // Agent harness the session runs on; fixed at create
   model: string; // LLM model to use (e.g., "anthropic/claude-haiku-4-5")
   reasoning_effort: string | null; // Reasoning effort level (e.g., "high", "max")
   status: SessionStatus;
+  status_revision: number;
   parent_session_id: string | null;
   spawn_source: SpawnSource;
   spawn_depth: number;
@@ -191,6 +194,16 @@ export interface SandboxRow {
    * `''` once revoked, NULL only on rows that predate persisted identities.
    */
   active_socket_id: string | null;
+  /** JSON `SandboxBootPhase` the runtime last reported while booting; NULL once ready. */
+  boot_phase: string | null;
+  /** Sequence number of that report, so a resend after a reconnect is recognised. */
+  boot_seq: number | null;
+  /**
+   * 1 once the boot budget revoked this generation's credentials for good: a
+   * fenced row can never become ready, so a runtime that outlived its budget
+   * cannot self-heal the way a watchdog-failed one may.
+   */
+  fenced: number;
   created_at: number;
 }
 
