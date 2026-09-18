@@ -327,6 +327,15 @@ sessions index, repo metadata, and encrypted secrets:
 - `integration_environment_settings`: environment-level integration-setting overrides (sandbox,
   code-server), the top layer above `integration_settings` (global) and `integration_repo_settings`
   (per-repo).
+- `session_model_usage`: reported token usage per session per model (input, output, cache read,
+  cache write, reasoning), the basis for cost analytics. `sessions.total_tokens` answers "how many
+  tokens" but not "what were they worth" — those components price up to 50x apart, and a session may
+  run several models. Cost is computed at read time from `MODEL_PRICING` in
+  `@open-inspect/shared/model-pricing` rather than stored, so a corrected rate reprices history.
+  Rollups report cumulative session usage, so writers replace a session's rows rather than
+  accumulating into them. `model_id` is the catalog id (`provider/model`), or `unattributed` for
+  steps whose model the runtime did not name; unattributed rows count toward token totals and are
+  never priced.
 
 Automations:
 
