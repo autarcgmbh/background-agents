@@ -33,7 +33,10 @@ describe("session token usage", () => {
       step({ tokens: { input: 100, output: 20, reasoning: 10, cache: { read: 50, write: 5 } } }),
       1
     );
-    expect(repository.getTotalTokens()).toBe(185);
+    // 100 input + 20 output + 50 cache read + 5 cache write. The 10 reasoning
+    // tokens are not added: providers that report them separately also count
+    // them inside output, so adding both would double-count thinking.
+    expect(repository.getTotalTokens()).toBe(175);
     repository.recordStepUsage(step({ tokens: 200 }), 2);
     repository.recordStepUsage(step({ tokens: 200 }), 3);
     expect(repository.getTotalTokens()).toBe(200);
@@ -44,6 +47,58 @@ describe("session token usage", () => {
     repository.recordStepUsage(step({ messageId: "second-turn", tokens: 40 }), 5);
     repository.recordStepUsage(step({ childSessionId: "child", tokens: 50 }), 6);
     expect(repository.getTotalTokens()).toBe(320);
+  });
+
+  describe("per-model attribution", () => {
+    it("splits usage by the model each step names", () => {
+      repository.recordStepUsage(
+        step({ stepId: "a", model: "anthropic/claude-opus-5", tokens: { input: 100, output: 20 } }),
+        1
+      );
+      repository.recordStepUsage(
+        step({ stepId: "b", model: "anthropic/claude-haiku-4-5", tokens: { input: 5, output: 1 } }),
+        2
+      );
+      repository.recordStepUsage(
+        step({ stepId: "c", model: "anthropic/claude-opus-5", tokens: { output: 30 } }),
+        3
+      );
+      expect(repository.getUsageByModel()).toEqual([
+        {
+          modelId: "anthropic/claude-opus-5",
+          usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        },
+        {
+          modelId: "anthropic/claude-haiku-4-5",
+          usage: { input: 5, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        },
+      ]);
+    });
+
+    it("pools usage from runtimes that name no model, so it counts but never prices", () => {
+      repository.recordStepUsage(step({ stepId: "a", tokens: { input: 10, output: 2 } }), 1);
+      expect(repository.getUsageByModel()).toEqual([
+        {
+          modelId: "unattributed",
+          usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        },
+      ]);
+    });
+
+    it("keeps a bare total out of the priced components", () => {
+      repository.recordStepUsage(step({ stepId: "a", tokens: 200 }), 1);
+      const [entry] = repository.getUsageByModel() ?? [];
+      // Carried as input only so the token count stays right; the step named
+      // no model, so it is unattributed and excluded from cost either way.
+      expect(entry).toEqual({
+        modelId: "unattributed",
+        usage: { input: 200, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+      });
+    });
+
+    it("reports null when nothing was reported, which is not an empty split", () => {
+      expect(repository.getUsageByModel()).toBeNull();
+    });
   });
 
   it("distinguishes missing, invalid, and zero usage and ignores reports without step identity", () => {

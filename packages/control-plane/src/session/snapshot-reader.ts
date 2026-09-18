@@ -1,3 +1,8 @@
+import { getValidHarnessOrDefault } from "@open-inspect/shared/harnesses";
+import {
+  sandboxBootPhaseSchema,
+  type SandboxBootPhase,
+} from "@open-inspect/shared/types/sandbox-events";
 import {
   sessionSnapshotSchema,
   type SessionSnapshotState,
@@ -76,8 +81,20 @@ export class SessionSnapshotReader {
         timeline: this.deps.eventStream.getReplay(),
         promptQueue: this.deps.messageRepository.listPromptQueue(),
         spawnError: local.sandbox?.last_spawn_error ?? null,
+        bootPhase: this.readBootPhase(local.sandbox),
       };
     });
+  }
+
+  /** The phase a booting sandbox last reported; null once ready or when unparseable. */
+  private readBootPhase(sandbox: SandboxRow | null): SandboxBootPhase | null {
+    if (!sandbox?.boot_phase) return null;
+    try {
+      const parsed = sandboxBootPhaseSchema.safeParse(JSON.parse(sandbox.boot_phase));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
   }
 
   private readSessionState(
@@ -97,6 +114,7 @@ export class SessionSnapshotReader {
       sandboxStatus: sandbox?.status ?? DEFAULT_SANDBOX_STATUS,
       messageCount: this.deps.messageRepository.getMessageCount(),
       createdAt: session.created_at,
+      harness: getValidHarnessOrDefault(session.harness),
       model: session.model ?? DEFAULT_MODEL,
       reasoningEffort: session.reasoning_effort ?? undefined,
       isProcessing: this.getIsProcessing(),

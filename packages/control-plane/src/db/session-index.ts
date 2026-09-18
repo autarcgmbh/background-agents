@@ -1,3 +1,8 @@
+import {
+  DEFAULT_HARNESS,
+  getValidHarnessOrDefault,
+  type HarnessId,
+} from "@open-inspect/shared/harnesses";
 import type {
   PullRequestSummary,
   SessionReadAction,
@@ -11,6 +16,7 @@ import {
   DEFAULT_SESSION_LIST_OFFSET,
 } from "@open-inspect/shared/session-list-query";
 import type { SessionListRepository } from "@open-inspect/shared/types/repositories";
+import type { ModelTokenUsage } from "@open-inspect/shared/model-pricing";
 import {
   sessionModelProviderAuthSchema,
   SUBSCRIPTION_PROVIDER_IDS,
@@ -22,6 +28,7 @@ import {
   type SessionModelProviderAuthInput,
 } from "../model-provider-accounts/provider-auth-contracts";
 import { bulkInsertStatements } from "./bulk-insert";
+import { SessionStatusProjectionStore } from "./session-status-projection-store";
 import { attachSessionListMetadata } from "./session-list-metadata";
 import {
   SessionInboxStore,
@@ -62,6 +69,8 @@ export interface SessionEntry {
   title: string | null;
   repoOwner: string | null;
   repoName: string | null;
+  /** Agent harness; absent on reads of pre-harness rows is impossible (column default). */
+  harness?: HarnessId;
   model: string;
   reasoningEffort: string | null;
   baseBranch: string | null;
@@ -108,6 +117,7 @@ interface SessionRow {
   title: string | null;
   repo_owner: string | null;
   repo_name: string | null;
+  harness: HarnessId;
   model: string;
   reasoning_effort: string | null;
   base_branch: string | null;
@@ -162,6 +172,7 @@ function toEntry(row: SessionRow): SessionEntry {
     title: row.title,
     repoOwner: row.repo_owner,
     repoName: row.repo_name,
+    harness: getValidHarnessOrDefault(row.harness),
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     baseBranch: row.base_branch,
@@ -267,14 +278,15 @@ export class SessionIndexStore {
 
     const sessionStmt = this.db
       .prepare(
-        `INSERT INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO sessions (id, title, repo_owner, repo_name, harness, model, reasoning_effort, base_branch, status, parent_session_id, root_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, scm_login, user_id, environment_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN ? ELSE (SELECT root_session_id FROM sessions WHERE id = ?) END, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         session.id,
         session.title,
         repository.repoOwner,
         repository.repoName,
+        session.harness ?? DEFAULT_HARNESS,
         session.model,
         session.reasoningEffort,
         repository.baseBranch,
@@ -725,23 +737,17 @@ export class SessionIndexStore {
     return row ? readStateFromRow(row) : null;
   }
 
-  async updateTitleIfNewer(id: string, title: string, updatedAt: number): Promise<boolean> {
+  async updateTitle(id: string, title: string, updatedAt: number): Promise<boolean> {
     const result = await this.db
-      .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND updated_at <= ?")
-      .bind(title, updatedAt, id, updatedAt)
+      .prepare("UPDATE sessions SET title = ?, updated_at = MAX(updated_at, ?) WHERE id = ?")
+      .bind(title, updatedAt, id)
       .run();
 
     return (result.meta?.changes ?? 0) > 0;
   }
 
   async updateStatus(id: string, status: SessionStatus, updatedAt = Date.now()): Promise<boolean> {
-    // Protect against out-of-order async writes by only applying monotonic updated_at values.
-    const result = await this.db
-      .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND updated_at <= ?")
-      .bind(status, updatedAt, id, updatedAt)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
+    return new SessionStatusProjectionStore(this.db).updateUnclaimed(id, status, updatedAt);
   }
 
   async updateMetrics(
@@ -749,26 +755,61 @@ export class SessionIndexStore {
     metrics: {
       totalCost: number;
       totalTokens?: number | null;
+      /**
+       * Cumulative usage for the whole session, per model. Undefined means the
+       * caller has nothing to say and the stored split is left alone; an empty
+       * array means the session reported no usage at all.
+       */
+      usageByModel?: Array<{ modelId: string; usage: ModelTokenUsage }>;
       activeDurationMs: number;
       messageCount: number;
       prCount: number;
     }
   ): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?, total_tokens = COALESCE(?, total_tokens)
+    const statements = [
+      this.db
+        .prepare(
+          `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?, total_tokens = COALESCE(?, total_tokens)
          WHERE id = ?`
-      )
-      .bind(
-        metrics.totalCost,
-        metrics.activeDurationMs,
-        metrics.messageCount,
-        metrics.prCount,
-        metrics.totalTokens ?? null,
-        id
-      )
-      .run();
-    return (result.meta?.changes ?? 0) > 0;
+        )
+        .bind(
+          metrics.totalCost,
+          metrics.activeDurationMs,
+          metrics.messageCount,
+          metrics.prCount,
+          metrics.totalTokens ?? null,
+          id
+        ),
+    ];
+    if (metrics.usageByModel) {
+      // The reported split is cumulative and authoritative, so the session's
+      // rows are replaced wholesale: a model dropped from the split (a step
+      // whose attribution was corrected) must not survive as a stale row.
+      statements.push(
+        this.db.prepare(`DELETE FROM session_model_usage WHERE session_id = ?`).bind(id)
+      );
+      for (const { modelId, usage } of metrics.usageByModel) {
+        statements.push(
+          this.db
+            .prepare(
+              `INSERT INTO session_model_usage
+                 (session_id, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
+            )
+            .bind(
+              id,
+              modelId,
+              usage.input,
+              usage.output,
+              usage.cacheRead,
+              usage.cacheWrite,
+              usage.reasoning
+            )
+        );
+      }
+    }
+    const results = await this.db.batch(statements);
+    return (results[0]?.meta?.changes ?? 0) > 0;
   }
 
   /**
@@ -778,7 +819,7 @@ export class SessionIndexStore {
    * so a row still sitting there long after its last update was abandoned before
    * any work started. Ordered oldest-first, which drains a backlog only while
    * every visited row leaves this set — see `archiveOrphanedDraft` and
-   * `repairStatus` for the two cases where that had to be made true.
+   * the runtime's status projection for the two cases where that had to be made true.
    */
   async listAbandonedDraftSessionIds(staleBefore: number, limit: number): Promise<string[]> {
     const result = await this.db
@@ -803,35 +844,7 @@ export class SessionIndexStore {
    * session between the sweep's read and this write is left alone.
    */
   async archiveOrphanedDraft(id: string): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        "UPDATE sessions SET status = 'archived', updated_at = ? WHERE id = ? AND status = 'created'"
-      )
-      .bind(Date.now(), id)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
-  }
-
-  /**
-   * Correct a draft status projection that drifted away from its Durable Object.
-   *
-   * Deliberately not `updateStatus`, which carries an `updated_at` and refuses
-   * writes that would move it backwards. That guard keeps concurrent transitions
-   * ordered, but it silently drops a repair: the Durable Object sends its own
-   * timestamp, which is behind D1's whenever `touchUpdatedAt` has run, so the
-   * write matches no rows and reports success as `false`. This repair asserts
-   * only the stale shape the draft sweep selected: D1 still says `created`, and
-   * the Durable Object says otherwise. Only that status column is written,
-   * leaving `updated_at` to keep meaning "last real activity".
-   */
-  async repairStatus(id: string, status: SessionStatus): Promise<boolean> {
-    const result = await this.db
-      .prepare("UPDATE sessions SET status = ? WHERE id = ? AND status = 'created' AND status != ?")
-      .bind(status, id, status)
-      .run();
-
-    return (result.meta?.changes ?? 0) > 0;
+    return new SessionStatusProjectionStore(this.db).archiveOrphanedDraft(id);
   }
 
   async touchUpdatedAt(id: string): Promise<boolean> {

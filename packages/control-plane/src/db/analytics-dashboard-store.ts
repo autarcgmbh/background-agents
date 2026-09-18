@@ -29,15 +29,33 @@ export class AnalyticsDashboardStore {
       now: filters.endAt,
     });
 
-    const [summary, timeseries, repository, user, session, ...pullRequestResults] =
-      await this.db.batch([
-        analytics.prepareSummary(sessionFilters),
-        analytics.prepareTimeseries(sessionFilters),
-        analytics.prepareBreakdown(sessionFilters, "repo"),
-        analytics.prepareBreakdown(sessionFilters, "user"),
-        analytics.prepareBreakdown(sessionFilters, "session"),
-        ...pullRequestStatements,
-      ]);
+    const [
+      summary,
+      timeseries,
+      repository,
+      user,
+      session,
+      repositoryUsage,
+      userUsage,
+      sessionUsage,
+      ...pullRequestResults
+    ] = await this.db.batch([
+      analytics.prepareSummary(sessionFilters),
+      analytics.prepareTimeseries(sessionFilters),
+      analytics.prepareBreakdown(sessionFilters, "repo"),
+      analytics.prepareBreakdown(sessionFilters, "user"),
+      analytics.prepareBreakdown(sessionFilters, "session"),
+      analytics.prepareModelUsage(sessionFilters, "repo"),
+      analytics.prepareModelUsage(sessionFilters, "user"),
+      analytics.prepareModelUsage(sessionFilters, "session"),
+      ...pullRequestStatements,
+    ]);
+
+    // The window's total is summed from the per-session split rather than the
+    // per-user or per-repo one: a session has exactly one of each, so all three
+    // agree, and the session split is the finest grain available.
+    const sessionCost = analytics.decodeModelUsage(sessionUsage);
+    const windowCost = analytics.totalComputedCost(sessionCost);
 
     return {
       generatedAt: filters.endAt,
@@ -46,12 +64,18 @@ export class AnalyticsDashboardStore {
         startAt: filters.startAt,
         endAt: filters.endAt,
       },
-      summary: analytics.decodeSummary(summary),
+      summary: { ...analytics.decodeSummary(summary), computedCost: windowCost },
       timeseries: analytics.decodeTimeseries(timeseries),
       breakdowns: {
-        repository: analytics.decodeBreakdown(repository),
-        user: analytics.decodeBreakdown(user),
-        session: analytics.decodeBreakdown(session),
+        repository: analytics.mergeModelUsage(
+          analytics.decodeBreakdown(repository),
+          analytics.decodeModelUsage(repositoryUsage)
+        ),
+        user: analytics.mergeModelUsage(
+          analytics.decodeBreakdown(user),
+          analytics.decodeModelUsage(userUsage)
+        ),
+        session: analytics.mergeModelUsage(analytics.decodeBreakdown(session), sessionCost),
       },
       pullRequests: pullRequests.decode(pullRequestResults),
     };

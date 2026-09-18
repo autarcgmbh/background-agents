@@ -110,6 +110,7 @@ describe("provider selection state", () => {
     ).toEqual({
       openai: { mode: "api_key" },
       xai: { mode: "legacy_scoped_oauth" },
+      anthropic: { mode: "legacy_scoped_oauth" },
     });
   });
 
@@ -132,6 +133,7 @@ describe("provider selection state", () => {
         archivedAt: null,
       },
       xai: { mode: "legacy_scoped_oauth" },
+      anthropic: { mode: "legacy_scoped_oauth" },
     });
   });
 });

@@ -19,6 +19,7 @@ import {
   type ProviderConnectionResult,
   type ProviderExternalIdentity,
   type ProviderObservedIdentity,
+  ProviderCredentialError,
   ProviderIdentityError,
   ProviderRefreshError,
 } from "../auth/model-provider-account-adapters";
@@ -215,6 +216,15 @@ export class ModelProviderAccountService {
   async verify(id: string, actorId: string): Promise<ModelProviderAccount> {
     const account = await this.getAccountForOperation(id, "active_use");
     const adapter = this.requireAdapter(account.provider);
+    if (adapter.supportsVerification === false) {
+      // A static credential has nothing to refresh: running the exchange
+      // would rotate the credential version without contacting the provider
+      // and revoke every sandbox holding what is still the same token.
+      throw new ProviderAccountServiceError(
+        "This provider's credential cannot be verified; reconnect the account instead",
+        409
+      );
+    }
     const current = await this.credentials.readCredentialState(account.id, account.provider);
     if (!current) throw new ProviderAccountServiceError("Provider credential not found", 409);
     if (current.exchangeState !== "idle") {
@@ -399,6 +409,11 @@ export class ModelProviderAccountService {
     } catch (cause) {
       if (cause instanceof ProviderIdentityError) {
         throw new ProviderAccountServiceError(cause.message, 409, { cause });
+      }
+      if (cause instanceof ProviderCredentialError) {
+        // Deterministic client input (a pasted value the adapter cannot
+        // read), not an upstream failure.
+        throw new ProviderAccountServiceError(cause.message, 400, { cause });
       }
       throw cause;
     }

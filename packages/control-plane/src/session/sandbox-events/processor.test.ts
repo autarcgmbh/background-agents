@@ -37,7 +37,12 @@ function createProcessor() {
   const repository = {
     updateSandboxHeartbeat: vi.fn(),
     recordReportedSandboxRuntimeVersion: vi.fn(),
+    getSandbox: vi.fn(() => ({ modal_sandbox_id: "sb-1", created_at: 4000 })),
+    markSandboxReady: vi.fn(() => true),
+    recordBootProgress: vi.fn(() => true),
+    getSession: vi.fn(() => null),
     getProcessingMessage,
+    getMessageContent: vi.fn(() => null as string | null),
     addSessionCost: vi.fn(() => 1.25),
     recordMessageCompletion: vi.fn((event: { messageId: string }, completedAt: number) => {
       getProcessingMessage.mockReturnValue(null);
@@ -69,6 +74,7 @@ function createProcessor() {
 
   const wsManager = {
     getSandboxSocket: vi.fn(() => null as WebSocket | null),
+    getReadySandboxSocket: vi.fn(() => null as WebSocket | null),
     send: vi.fn(() => true),
   };
 
@@ -83,7 +89,9 @@ function createProcessor() {
   const broadcastPromptQueue = vi.fn();
   const updateLastActivity = vi.fn();
   const progressKeepalive = { onStepFinish: vi.fn() };
+  const refreshSlackActivity = vi.fn();
   const applySessionTitleUpdate = vi.fn((title: string) => ({ ok: true as const, title }));
+  const offerFallbackTitle = vi.fn((_title: string) => {});
   const log = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -138,7 +146,8 @@ function createProcessor() {
       processMessageQueue,
       broadcastPromptQueue,
       budgetService,
-      (closure) => closure()
+      (closure) => closure(),
+      offerFallbackTitle
     ),
     new SandboxRuntimeEventHandler(
       repository as unknown as SessionCoreRepository,
@@ -147,7 +156,12 @@ function createProcessor() {
       messenger,
       diffService as unknown as SessionDiffService,
       applySessionTitleUpdate,
-      updateLastActivity
+      updateLastActivity,
+      refreshSlackActivity,
+      scheduleInactivityCheck,
+      backgroundTasks,
+      { processMessageQueue },
+      log
     ),
     pushService
   );
@@ -155,6 +169,7 @@ function createProcessor() {
   return {
     processor,
     pushService,
+    offerFallbackTitle,
     artifactRepository,
     repository,
     eventRepository,
@@ -170,6 +185,7 @@ function createProcessor() {
     broadcastPromptQueue,
     updateLastActivity,
     progressKeepalive,
+    refreshSlackActivity,
     applySessionTitleUpdate,
     backgroundTasks,
     log,
@@ -579,6 +595,57 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.backgroundTasks.submissions).not.toHaveLength(0);
   });
 
+  it("offers the prompt's first line as the title once the turn settles", async () => {
+    const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+    h.repository.getMessageContent.mockReturnValue("Fix the flaky checkout test\nIt times out.");
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-1",
+      success: true,
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    // Always offered: whether the title is still unset is decided by the
+    // atomic write behind the callback, never by a second read here.
+    expect(h.repository.getMessageContent).toHaveBeenCalledWith("msg-1");
+    expect(h.offerFallbackTitle).toHaveBeenCalledWith("Fix the flaky checkout test");
+  });
+
+  it("offers no title when the prompt has no usable text", async () => {
+    const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+    h.repository.getMessageContent.mockReturnValue("  \n\t ");
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-1",
+      success: true,
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.offerFallbackTitle).not.toHaveBeenCalled();
+  });
+
+  it("offers no title for a completion with no processing owner", async () => {
+    const h = createProcessor();
+    h.repository.getMessageContent.mockReturnValue("A late prompt");
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-late",
+      success: true,
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.repository.getMessageContent).not.toHaveBeenCalled();
+    expect(h.offerFallbackTitle).not.toHaveBeenCalled();
+  });
+
   it("waits for terminal projection before snapshot, queue drain, and acknowledgement", async () => {
     const h = createProcessor();
     const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
@@ -652,6 +719,7 @@ describe("SessionSandboxEventProcessor", () => {
     const h = createProcessor();
     const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
     h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+    h.wsManager.getReadySandboxSocket.mockReturnValue(sandboxWs);
 
     const pushPromise = h.pushService.pushBranchToRemote(
       createPushSpec("acme", "web", "feature/test")
@@ -766,6 +834,33 @@ describe("SessionSandboxEventProcessor", () => {
       });
 
       expect(h.updateLastActivity).toHaveBeenCalledWith(expect.any(Number));
+    });
+
+    it("refreshes the slack activity indicator on heartbeat while a message is processing", async () => {
+      const h = createProcessor();
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+
+      await h.processor.processSandboxEvent({
+        type: "heartbeat",
+        sandboxId: "sb-1",
+        status: "ready",
+        timestamp: 1000,
+      });
+
+      expect(h.refreshSlackActivity).toHaveBeenCalledWith("msg-1", expect.any(Number));
+    });
+
+    it("does not refresh the slack activity indicator on heartbeat while idle", async () => {
+      const h = createProcessor();
+
+      await h.processor.processSandboxEvent({
+        type: "heartbeat",
+        sandboxId: "sb-1",
+        status: "ready",
+        timestamp: 1000,
+      });
+
+      expect(h.refreshSlackActivity).not.toHaveBeenCalled();
     });
 
     it("does not reset activity timer on token", async () => {

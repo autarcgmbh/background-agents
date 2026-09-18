@@ -2,6 +2,53 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 18, 2026
+
+**Cost per session.** Analytics now values every session's tokens at published list prices, so a
+session running on a connected Claude or ChatGPT subscription is finally comparable to an API-billed
+one — the provider reports no cost for a seat, which had left the cost column reading zero for real
+work. The per-session table gains a sortable **Token cost** column; selecting a value breaks it down
+by model, splitting input, output and cache tokens, which price up to 50x apart. The runtime now
+reports which model spent each step's tokens, so a thread that burned Opus on a trivial task is
+visible as such. Anthropic and OpenAI models are priced from their published rates; anything without
+one is shown as unpriced and its totals marked as a lower bound rather than silently counted as
+free.
+
+**Upstream merge.** Brings in the Claude Agent SDK harness, sandbox boot phases, OpenCode Go models,
+and the AWS control-plane deploy. Two fork-specific reconciliations: provider accounts keep Kirk's
+seat identity (`external_principal_id`) on top of upstream's nullable account identity and identity
+adoption, so a reconnect is fenced on both the identity a slot holds and the seat that connects; and
+D1 migrations 0075/0076 stay Kirk's (session token usage, seat identity), with upstream's five new
+migrations renumbered to 0077-0081. Setup and start hooks lose their timeouts, which upstream
+removed in favour of a boot budget, and report their failing output through boot phases instead —
+except in an image build, where the build-failed callback still carries it.
+
+## September 17, 2026
+
+**Sandbox boot progress.** The sandbox runtime now connects to the control plane before it clones
+the repository, so a session shows each boot step as it runs: Cloning repository, Running setup.sh,
+Starting services, Installing skills, Starting agent, with the repository named in multi-repository
+sessions. Completed steps and their durations are listed in the session details panel, and a script
+whose failure ends the boot shows its last lines of output in the session header. Long setup scripts
+no longer trip the four-minute connect timeout; a boot may take up to `SANDBOX_BOOT_TIMEOUT_MS` (30
+minutes by default). See [How Open-Inspect Works](docs/HOW_IT_WORKS.md#fresh-start-no-snapshot).
+
+## September 14, 2026
+
+**OpenCode Go models.** Adds 27 opt-in `opencode-go/*` models to Settings > Models for OpenCode
+sessions. Configure `OPENCODE_API_KEY` in Settings > Secrets with an active Go subscription. See
+[Available models](docs/AVAILABLE_MODELS.md#opencode-go).
+
+## September 9, 2026
+
+**Claude Fable 5.1.** Adds `claude-fable-5-1` to the model picker and integrations, with adaptive
+thinking controls from low through max.
+
+**Claude Agent harness.** Sessions can run on the Claude Agent SDK as a second harness beside
+OpenCode, chosen in the composer and inherited by child sessions and automations. Claude Agent
+sessions can use a **connected Claude subscription** from Settings > Provider Accounts instead of an
+API key. See [Using the Claude Agent Harness](docs/CLAUDE_AGENT.md).
+
 ## September 3, 2026
 
 **Linear agent completes its sessions again.** Completion callbacks were rejected by the control

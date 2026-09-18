@@ -37,6 +37,8 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # quay.io, not Docker Hub: MinIO withdrew both images from Hub, so a Hub
+  # reference now fails to pull anonymously. Same releases, same digests.
   minio:
     image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"

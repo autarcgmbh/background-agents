@@ -156,6 +156,7 @@ describe("provider account seat identity", () => {
       writer.finalizeDeviceAuthorizationReconnect({
         authorization: await processingCreateAuthorization(),
         accountId: "account-legacy",
+        expectedExternalAccountId: WORKSPACE,
         externalAccountId: WORKSPACE,
         externalPrincipalId: "user-a",
         credential: { refreshToken: "adopted-secret" },
@@ -180,6 +181,7 @@ describe("provider account seat identity", () => {
       writer.finalizeDeviceAuthorizationReconnect({
         authorization: await processingCreateAuthorization(),
         accountId: "account-a",
+        expectedExternalAccountId: WORKSPACE,
         externalAccountId: WORKSPACE,
         externalPrincipalId: "user-b",
         credential: { refreshToken: "seat-b-secret" },
@@ -191,7 +193,7 @@ describe("provider account seat identity", () => {
     const stored = await new ProviderCredentialStore(
       env.DB,
       env.PROVIDER_ACCOUNTS_ENCRYPTION_KEY!
-    ).readCredentialState<{ refreshToken: string }>("account-a", "openai");
-    expect(stored?.payload.refreshToken).toBe("account-a-secret");
+    ).readCredentialState("account-a", "openai");
+    expect((stored?.payload as { refreshToken: string }).refreshToken).toBe("account-a-secret");
   });
 });

@@ -1,3 +1,4 @@
+import type { HarnessId } from "@open-inspect/shared/harnesses";
 import type { McpServerConfig } from "@open-inspect/shared/types/integrations";
 import { computeHmacHex } from "@open-inspect/shared/auth";
 import type { SourceControlProviderName } from "../source-control";
@@ -39,6 +40,8 @@ export interface SessionConfigPayload {
   session_id: string;
   repo_owner: string | null;
   repo_name: string | null;
+  /** Agent harness the runtime must boot. */
+  harness: HarnessId;
   provider: string;
   model: string;
   /** Omitted from the serialized payload when undefined. */
@@ -47,6 +50,13 @@ export interface SessionConfigPayload {
   branch?: string | null;
   /** Ordered member list; only present for multi-repo sessions. */
   repositories?: SessionRepositoryConfigPayload[];
+  /**
+   * Ask the runtime to connect its bridge before the repository boot and to
+   * report boot phases over it. Always true from this control plane, which
+   * treats the runtime's `ready` event, not the socket, as readiness. A
+   * runtime that predates the flag ignores it and boots in its old order.
+   */
+  bridge_early_connect: true;
 }
 
 /** Provider-agnostic inputs needed to assemble a {@link SessionConfigPayload}. */
@@ -54,6 +64,7 @@ export interface SessionConfigInput {
   sessionId: string;
   repoOwner: string | null;
   repoName: string | null;
+  harness: HarnessId;
   provider: string;
   model: string;
   mcpServers?: McpServerConfig[];
@@ -74,9 +85,11 @@ export function buildSessionConfig(input: SessionConfigInput): SessionConfigPayl
     session_id: input.sessionId,
     repo_owner: input.repoOwner,
     repo_name: input.repoName,
+    harness: input.harness,
     provider: input.provider,
     model: input.model,
     mcp_servers: input.mcpServers,
+    bridge_early_connect: true,
   };
   if (input.branch !== undefined) {
     payload.branch = input.branch;
