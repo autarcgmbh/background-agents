@@ -279,6 +279,45 @@ describe("MetadataSection", () => {
   });
 });
 
+describe("Open in Grafana", () => {
+  const originalStackUrl = process.env.NEXT_PUBLIC_GRAFANA_URL;
+
+  afterEach(() => {
+    if (originalStackUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_GRAFANA_URL;
+    } else {
+      process.env.NEXT_PUBLIC_GRAFANA_URL = originalStackUrl;
+    }
+  });
+
+  it("links the session at its Grafana conversation", () => {
+    process.env.NEXT_PUBLIC_GRAFANA_URL = "https://mystack.grafana.net";
+
+    render(<MetadataSection createdAt={Date.now()} baseBranch="main" agentSessionId="conv-1" />);
+
+    expect(screen.getByRole("link", { name: "Open in Grafana" })).toHaveAttribute(
+      "href",
+      "https://mystack.grafana.net/a/grafana-agento11y-app/conversations/conv-1"
+    );
+  });
+
+  it("stays hidden while the session has no agent conversation yet", () => {
+    process.env.NEXT_PUBLIC_GRAFANA_URL = "https://mystack.grafana.net";
+
+    render(<MetadataSection createdAt={Date.now()} baseBranch="main" agentSessionId={null} />);
+
+    expect(screen.queryByText("Open in Grafana")).not.toBeInTheDocument();
+  });
+
+  it("stays hidden when the deployment has no Grafana stack", () => {
+    delete process.env.NEXT_PUBLIC_GRAFANA_URL;
+
+    render(<MetadataSection createdAt={Date.now()} baseBranch="main" agentSessionId="conv-1" />);
+
+    expect(screen.queryByText("Open in Grafana")).not.toBeInTheDocument();
+  });
+});
+
 describe("PR sync button", () => {
   const prArtifact = {
     id: "artifact-pr-1",

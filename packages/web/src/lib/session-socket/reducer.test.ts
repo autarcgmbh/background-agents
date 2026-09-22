@@ -813,6 +813,21 @@ describe("sessionSocketReducer", () => {
       );
     });
 
+    it("records the agent conversation id and follows a rotation", () => {
+      const state = reduce(
+        subscribedState(),
+        serverMessage({ type: "agent_session", agentSessionId: "conv-1" })
+      );
+      expect(state.sessionState?.agentSessionId).toBe("conv-1");
+
+      // A conversation reset rotates the id mid-session.
+      const rotated = reduce(
+        state,
+        serverMessage({ type: "agent_session", agentSessionId: "conv-2" })
+      );
+      expect(rotated.sessionState?.agentSessionId).toBe("conv-2");
+    });
+
     it("clears credentials and the dashboard URL on a replacement start", () => {
       const state = reduce(
         withAccessState(),

@@ -56,5 +56,11 @@ module "web_app" {
     },
     # Append new variables to keep count indices stable and avoid Vercel
     # ENV_CONFLICT replacement races.
+    {
+      key       = "NEXT_PUBLIC_GRAFANA_URL"
+      value     = var.grafana_url
+      targets   = ["production", "preview"]
+      sensitive = false
+    },
   ]
 }

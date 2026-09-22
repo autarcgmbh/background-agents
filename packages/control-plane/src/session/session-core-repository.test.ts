@@ -335,6 +335,55 @@ describe("SessionCoreRepository", () => {
     });
   });
 
+  describe("setAgentSessionId", () => {
+    it("stores a new id and reports the change, then no-ops on the repeat", () => {
+      const db = new DatabaseSync(":memory:");
+      const storage = createNodeSqlStorage(db);
+      const realRepo = new SessionCoreRepository(storage.sql, storage.transactionSync);
+
+      try {
+        initSchema(storage.sql);
+        realRepo.upsertSession({
+          id: "sess-1",
+          sessionName: "test-session",
+          title: "First",
+          repoOwner: "owner",
+          repoName: "repo",
+          repoId: 42,
+          model: "claude-sonnet-4",
+          status: "created",
+          createdAt: 1000,
+          updatedAt: 1000,
+        });
+
+        expect(realRepo.setAgentSessionId("conv-1")).toBe(true);
+        expect(realRepo.getSession()).toMatchObject({ agent_session_id: "conv-1" });
+
+        // A reconnecting bridge re-reports the id it already has.
+        expect(realRepo.setAgentSessionId("conv-1")).toBe(false);
+
+        // A conversation reset rotates it.
+        expect(realRepo.setAgentSessionId("conv-2")).toBe(true);
+        expect(realRepo.getSession()).toMatchObject({ agent_session_id: "conv-2" });
+      } finally {
+        db.close();
+      }
+    });
+
+    it("reports no change when there is no session row yet", () => {
+      const db = new DatabaseSync(":memory:");
+      const storage = createNodeSqlStorage(db);
+      const realRepo = new SessionCoreRepository(storage.sql, storage.transactionSync);
+
+      try {
+        initSchema(storage.sql);
+        expect(realRepo.setAgentSessionId("conv-1")).toBe(false);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   // === SESSION REPOSITORIES ===
 
   describe("replaceSessionRepositories", () => {

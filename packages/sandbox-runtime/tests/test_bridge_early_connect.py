@@ -187,9 +187,14 @@ class TestHarnessAttach:
 
         await bridge._relay_boot_events()
 
-        assert calls == ["open", "resume:oc-persisted", "signing", "ready"]
+        # The resumed conversation is announced as soon as it is loaded, before
+        # the bridge reports readiness.
+        assert calls == ["open", "resume:oc-persisted", "agent_session", "signing", "ready"]
         assert bridge.harness is harness
         assert bridge._boot_ready.is_set()
+        sent = [call.args[0] for call in bridge._send_event.await_args_list]
+        announced = next(event for event in sent if event["type"] == "agent_session")
+        assert announced["agentSessionId"] == "oc-persisted"
         ready = bridge._send_event.await_args.args[0]
         assert ready["opencodeSessionId"] == "oc-persisted"
         assert ready["harness"] == "opencode"

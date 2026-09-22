@@ -64,12 +64,29 @@ These tags reach conversations, traces, and client token/latency metrics. Grafan
 filter cost panels with `gen_ai_agent_name=~"open-inspect-.*"` (or your configured agent names).
 
 The plugins use the underlying agent conversation ID. Open-Inspect's session API exposes that ID as
-`agentSessionId`, so you can use it to find the corresponding Grafana conversation. Resuming the
-same agent session keeps its ID; a conversation reset creates a new one. Subagent capture and
-parent-generation links are handled by the official plugins.
+`agentSessionId`, so you can use it to find the corresponding Grafana conversation. The runtime
+reports the ID as soon as it creates, resumes, or rotates a conversation — a fresh session has none
+until its first prompt, because the harness creates the conversation lazily. Resuming the same agent
+session keeps its ID; a conversation reset creates a new one. Subagent capture and parent-generation
+links are handled by the official plugins.
 
 No historical backfill runs automatically. The old `sessions.total_tokens` column and
 `session_model_usage` table remain as historical data; new sessions no longer update or query them.
+
+## Open in Grafana
+
+Set the `grafana_url` Terraform variable (or `NEXT_PUBLIC_GRAFANA_URL` when running the web app
+yourself) to your stack origin, for example `https://mystack.grafana.net`. The session details
+sidebar then shows an **Open in Grafana** link pointing at that session's conversation:
+
+```
+<grafana_url>/a/grafana-agento11y-app/conversations/<agentSessionId>
+```
+
+It is a `NEXT_PUBLIC_*` variable, so it is inlined into the client bundle at build time — rebuild
+the web app after changing it. The link appears only once the session has an agent conversation ID,
+so a session that has not been prompted yet shows no link. Leaving the variable empty omits the link
+entirely, which is what a deployment that exports nothing to Grafana wants.
 
 ## Verify and diagnose
 

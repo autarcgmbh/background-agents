@@ -126,6 +126,14 @@ export const sandboxEventSchema = z.discriminatedUnion("type", [
     runtimeVersion: z.string().optional(),
     repositories: z.array(sessionDiffBaselineRepositorySchema).optional(),
   }),
+  // The agent's own conversation id, reported whenever the runtime creates,
+  // resumes, or rotates one. The id materialises after `ready` (the harness
+  // creates its conversation on the first prompt), so this event — not the
+  // `ready` payload — is what tells the session about a fresh conversation.
+  sandboxEventBaseSchema.extend({
+    type: z.literal("agent_session"),
+    agentSessionId: z.string().min(1),
+  }),
   messageSandboxEventBaseSchema.extend({
     type: z.literal("token"),
     content: z.string(),

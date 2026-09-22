@@ -5,6 +5,7 @@ import Link from "next/link";
 import { formatModelName, truncateBranch, copyToClipboard } from "@/lib/format";
 import { formatRelativeTime } from "@/lib/time";
 import { getSafeExternalUrl } from "@/lib/urls";
+import { getGrafanaConversationUrl } from "@/lib/grafana";
 import { getScmBranchUrl, getScmRepoUrl } from "@/lib/scm";
 import { NO_REPOSITORY_LABEL } from "@/lib/repo-label";
 import type { Artifact, SandboxEvent } from "@/types/session";
@@ -23,6 +24,7 @@ import {
   LinkIcon,
   ErrorIcon,
   RefreshIcon,
+  ActivityIcon,
 } from "@/components/ui/icons";
 import { Badge } from "@/components/ui/badge";
 import { prBadgeVariant } from "@/components/ui/badge-variants";
@@ -50,6 +52,8 @@ interface MetadataSectionProps {
   /** Non-fatal boot/runtime warnings surfaced to the user. */
   warnings?: WarningEvent[];
   parentSessionId?: string | null;
+  /** The agent's conversation id; deep-links the session into Grafana. */
+  agentSessionId?: string | null;
   canManageLifecycle: boolean;
 }
 
@@ -106,6 +110,7 @@ export function MetadataSection({
   environmentName,
   warnings = [],
   parentSessionId,
+  agentSessionId,
   canManageLifecycle,
 }: MetadataSectionProps) {
   const [copied, setCopied] = useState(false);
@@ -127,6 +132,9 @@ export function MetadataSection({
   const branchUrl =
     branchName && repoOwner && repoName ? getScmBranchUrl(repoOwner, repoName, branchName) : null;
   const hasRepositoryMetadata = repoOwner !== undefined && repoName !== undefined;
+  // Null until this deployment exports to Grafana and the runtime has reported
+  // a conversation id — both are needed before there is anything to open.
+  const grafanaConversationUrl = getGrafanaConversationUrl(agentSessionId);
 
   const handleCopyBranch = async () => {
     if (branchName) {
@@ -164,6 +172,21 @@ export function MetadataSection({
             {formatModelName(model)}
             {reasoningEffort && <span> · {reasoningEffort}</span>}
           </span>
+        </div>
+      )}
+
+      {/* Grafana conversation (Agent Observability) */}
+      {grafanaConversationUrl && (
+        <div className="flex items-center gap-2 text-sm">
+          <ActivityIcon className="w-4 h-4 text-muted-foreground" />
+          <a
+            href={grafanaConversationUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent hover:underline"
+          >
+            Open in Grafana
+          </a>
         </div>
       )}
 

@@ -115,6 +115,7 @@ export class SessionSnapshotReader {
       messageCount: this.deps.messageRepository.getMessageCount(),
       createdAt: session.created_at,
       harness: getValidHarnessOrDefault(session.harness),
+      agentSessionId: session.agent_session_id,
       model: session.model ?? DEFAULT_MODEL,
       reasoningEffort: session.reasoning_effort ?? undefined,
       isProcessing: this.getIsProcessing(),

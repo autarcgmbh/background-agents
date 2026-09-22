@@ -131,6 +131,7 @@ export function SessionRightSidebarContent({
           environmentName={sessionState.environmentName}
           warnings={warnings}
           parentSessionId={sessionState.parentSessionId}
+          agentSessionId={sessionState.agentSessionId}
           canManageLifecycle={capabilities.lifecycle}
         />
         <BudgetSection
