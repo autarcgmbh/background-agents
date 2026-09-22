@@ -207,12 +207,17 @@ jobs:
         run: |
           terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
           echo "plan<<EOF" >> $GITHUB_OUTPUT
-          # Read the head directly rather than `cat … | head`: head closes the
-          # pipe at its byte budget, cat takes SIGPIPE, and the default shell's
-          # -o pipefail turns that into a step failure. A worker bundle lands in
-          # the diff as inline base64, so any plan that replaces one blows past
-          # the budget and every such run failed on a plan that had succeeded.
-          head -c 60000 plan_output.txt >> $GITHUB_OUTPUT
+          # Both halves of this guard the same case: a plan too big to post
+          # whole. A worker bundle lands in the diff as inline base64, so any
+          # plan that replaces one runs to megabytes, and every such run used
+          # to fail on a plan that had actually succeeded.
+          #   - Read the head directly rather than `cat … | head`: head closes
+          #     the pipe at its byte budget, cat takes SIGPIPE, and the default
+          #     shell's -o pipefail turns that into a step failure.
+          #   - Force a trailing newline: head -c can cut mid-line, and a
+          #     delimiter appended to a partial line is never matched
+          #     ("Invalid value. Matching delimiter not found").
+          { head -c 60000 plan_output.txt; echo; } >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
         working-directory: ${{ env.TF_WORKING_DIR }}
         continue-on-error: true
