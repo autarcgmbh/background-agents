@@ -176,8 +176,39 @@ describe("provider account management routes", () => {
       default: { provider: "openai", unattendedMode: "api_key" },
     });
 
+    await expect(
+      managementFetch("/model-provider-account-defaults/openai", {
+        method: "PUT",
+        body: {
+          providerAccountId: OPENAI_ACCOUNT_ID,
+          unattendedMode: "provider_account",
+          selectionStrategy: "round_robin",
+        },
+      }).then((response) => response.json())
+    ).resolves.toMatchObject({ default: { selectionStrategy: "round_robin" } });
+    // Moving the default without naming a strategy leaves rotation as it was.
+    await expect(
+      managementFetch("/model-provider-account-defaults/openai", {
+        method: "PUT",
+        body: { providerAccountId: OPENAI_ACCOUNT_ID, unattendedMode: "api_key" },
+      }).then((response) => response.json())
+    ).resolves.toMatchObject({
+      default: { unattendedMode: "api_key", selectionStrategy: "round_robin" },
+    });
+    const rejected = await managementFetch("/model-provider-account-defaults/openai", {
+      method: "PUT",
+      body: {
+        providerAccountId: OPENAI_ACCOUNT_ID,
+        unattendedMode: "api_key",
+        selectionStrategy: "random",
+      },
+    });
+    expect(rejected.status).toBe(400);
+
     const list = await managementFetch("/model-provider-account-defaults");
-    await expect(list.json()).resolves.toMatchObject({ defaults: [{ provider: "openai" }] });
+    await expect(list.json()).resolves.toMatchObject({
+      defaults: [{ provider: "openai", selectionStrategy: "round_robin" }],
+    });
 
     const removed = await managementFetch("/model-provider-account-defaults/openai", {
       method: "DELETE",

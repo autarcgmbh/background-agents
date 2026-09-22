@@ -339,6 +339,54 @@ describe("UserEnvResolver", () => {
         data: undefined,
       });
     });
+
+    it("tags the connected account the session's model runs on", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows({ ...API_KEY_MODES, anthropic: "provider_account" });
+      h.db.accountRow = accountRow("active");
+      h.db.globalSecretRows = await secretRows({ AGENTO11Y_ENDPOINT: "https://grafana.test" });
+      expect(await h.resolver.getUserEnvVars()).toMatchObject({
+        AGENTO11Y_TAGS: `provider_account=Owner Claude,provider_account_id=${"1".repeat(32)}`,
+      });
+    });
+
+    it("keeps operator tags after the account tags and sanitizes the display name", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows({ ...API_KEY_MODES, anthropic: "provider_account" });
+      h.db.accountRow = accountRow("active", { display_name: "Ops, EU=prod" });
+      h.db.globalSecretRows = await secretRows({
+        AGENTO11Y_ENDPOINT: "https://grafana.test",
+        AGENTO11Y_TAGS: "team=dev",
+      });
+      expect(await h.resolver.getUserEnvVars()).toMatchObject({
+        AGENTO11Y_TAGS: `provider_account=Ops EU prod,provider_account_id=${"1".repeat(32)},team=dev`,
+      });
+    });
+
+    it("adds no account tag for API-key sessions or models on another provider", async () => {
+      const apiKey = makeHarness();
+      apiKey.db.providerAuthRows = providerAuthRows(API_KEY_MODES);
+      apiKey.db.globalSecretRows = await secretRows({ AGENTO11Y_ENDPOINT: "https://grafana.test" });
+      expect(await apiKey.resolver.getUserEnvVars()).not.toHaveProperty("AGENTO11Y_TAGS");
+
+      const otherProvider = makeHarness({ session: sessionRow({ model: "openai/gpt-5.5" }) });
+      otherProvider.db.providerAuthRows = providerAuthRows({
+        ...API_KEY_MODES,
+        anthropic: "provider_account",
+      });
+      otherProvider.db.accountRow = accountRow("active");
+      otherProvider.db.globalSecretRows = await secretRows({
+        AGENTO11Y_ENDPOINT: "https://grafana.test",
+      });
+      expect(await otherProvider.resolver.getUserEnvVars()).not.toHaveProperty("AGENTO11Y_TAGS");
+    });
+
+    it("leaves telemetry untagged when Grafana is not configured", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows({ ...API_KEY_MODES, anthropic: "provider_account" });
+      h.db.accountRow = accountRow("active");
+      expect(await h.resolver.getUserEnvVars()).not.toHaveProperty("AGENTO11Y_TAGS");
+    });
   });
 
   describe("missing session row", () => {

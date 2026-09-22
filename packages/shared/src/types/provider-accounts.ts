@@ -61,6 +61,17 @@ export const providerAuthSelectionSchema = z.discriminatedUnion("mode", [
 export type ProviderAuthSelection = z.infer<typeof providerAuthSelectionSchema>;
 export const providerAuthModeSchema = z.enum(["provider_account", "api_key"]);
 export type ProviderAuthMode = z.infer<typeof providerAuthModeSchema>;
+
+/**
+ * How a provider's installation default chooses the account a policy-following
+ * session binds. `default` always binds the default account; `round_robin`
+ * binds the provider's least recently selected active account so every
+ * connected subscription is drawn on evenly, with the default as the fallback.
+ */
+export const providerAccountSelectionStrategySchema = z.enum(["default", "round_robin"]);
+export type ProviderAccountSelectionStrategy = z.infer<
+  typeof providerAccountSelectionStrategySchema
+>;
 export type SessionProviderAuthMode = ProviderAuthMode | "legacy_scoped_oauth";
 
 /** Closed, bounded map: one optional selection for each supported subscription provider. */
@@ -138,6 +149,7 @@ export const modelProviderAccountDefaultSchema = z.strictObject({
   provider: subscriptionProviderIdSchema,
   providerAccountId: modelProviderAccountIdSchema,
   unattendedMode: providerAuthModeSchema,
+  selectionStrategy: providerAccountSelectionStrategySchema.default("default"),
   createdBy: z.string().min(1).nullable(),
   updatedBy: z.string().min(1).nullable(),
   createdAt: z.number().int().nonnegative(),
@@ -155,6 +167,8 @@ export type ModelProviderAccountDefaultResponse = z.infer<
 export const modelProviderAccountDefaultRequestSchema = z.strictObject({
   providerAccountId: modelProviderAccountIdSchema,
   unattendedMode: providerAuthModeSchema,
+  /** Omitted keeps the stored strategy, so callers that only move the default leave rotation alone. */
+  selectionStrategy: providerAccountSelectionStrategySchema.optional(),
 });
 
 export const modelProviderAccountDefaultsResponseSchema = z.strictObject({

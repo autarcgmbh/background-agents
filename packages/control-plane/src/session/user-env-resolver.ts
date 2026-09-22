@@ -29,6 +29,7 @@ import { ModelProviderAccountStore } from "../db/model-provider-accounts";
 import type { SqlDatabase } from "../db/sql-database";
 import type { Logger } from "../logger";
 import { resolvePublicSessionId } from "./public-session-id";
+import { composeProviderAccountTags } from "./agento11y-tags";
 import { buildSessionTargetSecretSources } from "./session-target-secrets";
 import type { SessionRepositoryEntry } from "./repository-target";
 import type { SessionCoreRepository } from "./session-core-repository";
@@ -211,21 +212,52 @@ export class UserEnvResolver {
       brokerSecrets: managedSecrets,
       providerAuthModes,
     });
-    if (sandboxEnv.AGENTO11Y_ENDPOINT?.trim() && !sandboxEnv.AGENTO11Y_USER_ID?.trim()) {
-      // Attribute the sandbox to its session creator, not the image's shared OS user.
-      // This is optional telemetry enrichment and must not prevent a session from starting.
-      sandboxEnv.AGENTO11Y_USER_ID = "unknown";
-      try {
-        const creator = await db
-          .prepare("SELECT user_id, scm_login FROM sessions WHERE id = ?")
-          .bind(resolvePublicSessionId(session, this.durableObjectId))
-          .first<{ user_id: string | null; scm_login: string | null }>();
-        sandboxEnv.AGENTO11Y_USER_ID = creator?.user_id || creator?.scm_login || "unknown";
-      } catch {
-        this.log.warn("agento11y.user_attribution_unavailable");
+    if (sandboxEnv.AGENTO11Y_ENDPOINT?.trim()) {
+      // Optional telemetry enrichment: neither lookup may prevent a session from starting.
+      if (!sandboxEnv.AGENTO11Y_USER_ID?.trim()) {
+        // Attribute the sandbox to its session creator, not the image's shared OS user.
+        sandboxEnv.AGENTO11Y_USER_ID = "unknown";
+        try {
+          const creator = await db
+            .prepare("SELECT user_id, scm_login FROM sessions WHERE id = ?")
+            .bind(resolvePublicSessionId(session, this.durableObjectId))
+            .first<{ user_id: string | null; scm_login: string | null }>();
+          sandboxEnv.AGENTO11Y_USER_ID = creator?.user_id || creator?.scm_login || "unknown";
+        } catch {
+          this.log.warn("agento11y.user_attribution_unavailable");
+        }
       }
+      await this.tagProviderAccount(
+        sandboxEnv,
+        session.model,
+        providerAuthModes,
+        providerAccountIds
+      );
     }
     return { sandboxEnv, providerAuthModes, providerAccountIds };
+  }
+
+  /**
+   * Tag telemetry with the connected account the session's model runs on, so
+   * usage can be read per subscription. The sandbox environment is fixed at
+   * spawn, so this names the account bound for the model at that moment.
+   */
+  private async tagProviderAccount(
+    sandboxEnv: Record<string, string>,
+    model: string,
+    providerAuthModes: UserEnvContext["providerAuthModes"],
+    providerAccountIds: UserEnvContext["providerAccountIds"]
+  ): Promise<void> {
+    const provider = model.split("/", 1)[0] as SubscriptionProviderId;
+    const accountId = providerAccountIds[provider];
+    if (!accountId || providerAuthModes[provider] !== "provider_account") return;
+    try {
+      const account = await new ModelProviderAccountStore(this.db).getById(accountId);
+      if (!account || account.archivedAt !== null) return;
+      sandboxEnv.AGENTO11Y_TAGS = composeProviderAccountTags(sandboxEnv.AGENTO11Y_TAGS, account);
+    } catch {
+      this.log.warn("agento11y.provider_account_attribution_unavailable");
+    }
   }
 
   /**

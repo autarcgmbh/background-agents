@@ -35,12 +35,14 @@ function account(
 function providerDefault(
   provider: SubscriptionProviderId,
   providerAccountId: string,
-  unattendedMode: "provider_account" | "api_key" = "provider_account"
+  unattendedMode: "provider_account" | "api_key" = "provider_account",
+  selectionStrategy: "default" | "round_robin" = "default"
 ): ProviderDefault {
   return {
     provider,
     providerAccountId,
     unattendedMode,
+    selectionStrategy,
     createdBy: null,
     updatedBy: null,
     createdAt: 1,
@@ -52,13 +54,18 @@ function stores(
   options: {
     defaults?: ProviderDefault[];
     accounts?: ModelProviderAccount[];
+    /** What the rotation pick returns; the store fake does not model pointer order. */
+    rotation?: ModelProviderAccount | null;
   } = {}
 ) {
   const defaults = new Map((options.defaults ?? []).map((item) => [item.provider, item]));
   const accounts = new Map((options.accounts ?? []).map((item) => [item.id, item]));
   return {
     defaults: { get: vi.fn(async (provider: "openai" | "xai") => defaults.get(provider) ?? null) },
-    accounts: { getById: vi.fn(async (id: string) => accounts.get(id) ?? null) },
+    accounts: {
+      getById: vi.fn(async (id: string) => accounts.get(id) ?? null),
+      selectNextForRotation: vi.fn(async () => options.rotation ?? null),
+    },
     adapters: { get: vi.fn(() => ({})) },
   };
 }
@@ -219,5 +226,114 @@ describe("resolveProviderAccountSelections", () => {
       { provider: "anthropic", authMode: "api_key", selectionSource: "api_key_fallback" },
     ]);
     expect(deps.accounts.getById).not.toHaveBeenCalled();
+  });
+
+  describe("round-robin strategy", () => {
+    const ROTATED_ACCOUNT_ID = "4".repeat(32);
+
+    it("binds the rotated account instead of the default", async () => {
+      const deps = stores({
+        defaults: [providerDefault("openai", OPENAI_ACCOUNT_ID, "provider_account", "round_robin")],
+        accounts: [
+          account(OPENAI_ACCOUNT_ID, "openai"),
+          account(ROTATED_ACCOUNT_ID, "openai", { displayName: "Second seat" }),
+        ],
+        rotation: account(ROTATED_ACCOUNT_ID, "openai", { displayName: "Second seat" }),
+      });
+      const result = await resolveProviderAccountSelections(
+        { unattended: false, harness: "opencode" },
+        deps
+      );
+      expect(result[0]).toEqual({
+        provider: "openai",
+        authMode: "provider_account",
+        providerAccountId: ROTATED_ACCOUNT_ID,
+        selectionSource: "round_robin",
+      });
+      expect(deps.accounts.selectNextForRotation).toHaveBeenCalledWith("openai");
+    });
+
+    it("rotates unattended launches whose policy is the account", async () => {
+      const deps = stores({
+        defaults: [providerDefault("openai", OPENAI_ACCOUNT_ID, "provider_account", "round_robin")],
+        accounts: [account(ROTATED_ACCOUNT_ID, "openai")],
+        rotation: account(ROTATED_ACCOUNT_ID, "openai"),
+      });
+      const result = await resolveProviderAccountSelections(
+        { unattended: true, harness: "opencode" },
+        deps
+      );
+      expect(result[0]).toMatchObject({
+        providerAccountId: ROTATED_ACCOUNT_ID,
+        selectionSource: "round_robin",
+      });
+    });
+
+    it("does not advance the pointer for a launch that ends without an account", async () => {
+      const apiKeyUnattended = stores({
+        defaults: [providerDefault("openai", OPENAI_ACCOUNT_ID, "api_key", "round_robin")],
+        rotation: account(ROTATED_ACCOUNT_ID, "openai"),
+      });
+      const unattended = await resolveProviderAccountSelections(
+        { unattended: true, harness: "opencode" },
+        apiKeyUnattended
+      );
+      expect(unattended[0]).toEqual({
+        provider: "openai",
+        authMode: "api_key",
+        selectionSource: "unattended_policy",
+      });
+      expect(apiKeyUnattended.accounts.selectNextForRotation).not.toHaveBeenCalled();
+
+      const wrongHarness = stores({
+        defaults: [providerDefault("openai", OPENAI_ACCOUNT_ID, "provider_account", "round_robin")],
+        rotation: account(ROTATED_ACCOUNT_ID, "openai"),
+      });
+      const onClaude = await resolveProviderAccountSelections(
+        { unattended: false, harness: "claude" },
+        wrongHarness
+      );
+      expect(onClaude[0]).toEqual({
+        provider: "openai",
+        authMode: "api_key",
+        selectionSource: "harness_fallback",
+      });
+      expect(wrongHarness.accounts.selectNextForRotation).not.toHaveBeenCalled();
+    });
+
+    it("never rotates an explicit account choice", async () => {
+      const deps = stores({
+        defaults: [
+          providerDefault("openai", ROTATED_ACCOUNT_ID, "provider_account", "round_robin"),
+        ],
+        accounts: [account(OPENAI_ACCOUNT_ID, "openai")],
+        rotation: account(ROTATED_ACCOUNT_ID, "openai"),
+      });
+      const result = await resolveProviderAccountSelections(
+        {
+          explicit: { openai: { mode: "provider_account", accountId: OPENAI_ACCOUNT_ID } },
+          unattended: false,
+          harness: "opencode",
+        },
+        deps
+      );
+      expect(result[0]).toMatchObject({
+        providerAccountId: OPENAI_ACCOUNT_ID,
+        selectionSource: "explicit",
+      });
+      expect(deps.accounts.selectNextForRotation).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the default when nothing is active to rotate over", async () => {
+      const deps = stores({
+        defaults: [providerDefault("openai", OPENAI_ACCOUNT_ID, "provider_account", "round_robin")],
+        accounts: [account(OPENAI_ACCOUNT_ID, "openai", { status: "reconnect_required" })],
+        rotation: null,
+      });
+      await expect(
+        resolveProviderAccountSelections({ unattended: false, harness: "opencode" }, deps)
+      ).rejects.toMatchObject({ status: 409 });
+      expect(deps.accounts.selectNextForRotation).toHaveBeenCalledTimes(1);
+    });
   });
 });

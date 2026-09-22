@@ -93,6 +93,20 @@ describe("provider account write requests", () => {
       })
     ).toEqual({ providerAccountId: ACCOUNT_ID, unattendedMode: "provider_account" });
     expect(
+      modelProviderAccountDefaultRequestSchema.parse({
+        providerAccountId: ACCOUNT_ID,
+        unattendedMode: "provider_account",
+        selectionStrategy: "round_robin",
+      }).selectionStrategy
+    ).toBe("round_robin");
+    expect(
+      modelProviderAccountDefaultRequestSchema.safeParse({
+        providerAccountId: ACCOUNT_ID,
+        unattendedMode: "provider_account",
+        selectionStrategy: "random",
+      }).success
+    ).toBe(false);
+    expect(
       modelProviderAccountDefaultRequestSchema.safeParse({
         providerAccountId: ACCOUNT_ID,
         unattendedMode: "provider_account",
@@ -236,6 +250,7 @@ describe("provider account response schemas", () => {
             provider: "openai",
             providerAccountId: ACCOUNT_ID,
             unattendedMode: "provider_account",
+            selectionStrategy: "round_robin",
             createdBy: "user-1",
             updatedBy: "user-1",
             createdAt: 1,
@@ -244,8 +259,9 @@ describe("provider account response schemas", () => {
         ],
       }).success
     ).toBe(true);
+    // A default row from a control plane that predates rotation reads as the plain strategy.
     expect(
-      modelProviderAccountDefaultResponseSchema.safeParse({
+      modelProviderAccountDefaultResponseSchema.parse({
         default: {
           provider: "openai",
           providerAccountId: ACCOUNT_ID,
@@ -255,8 +271,8 @@ describe("provider account response schemas", () => {
           createdAt: 1,
           updatedAt: 2,
         },
-      }).success
-    ).toBe(true);
+      }).default.selectionStrategy
+    ).toBe("default");
     expect(
       sessionModelProviderAuthResponseSchema.safeParse({
         providerAuth: [

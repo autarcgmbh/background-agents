@@ -70,7 +70,11 @@ describe("Scheduler (integration)", () => {
           provider,
           displayName: provider,
         });
-        await defaults.set(provider, accountIds[provider], "provider_account", null);
+        await defaults.set(provider, {
+          providerAccountId: accountIds[provider],
+          unattendedMode: "provider_account",
+          actorId: null,
+        });
       }
     }
 
@@ -128,7 +132,11 @@ describe("Scheduler (integration)", () => {
         const automation = makeAutomation({ id: `auto-policy-${provider}` });
         await new AutomationStore(env.DB).create(automation);
         const defaults = new ProviderDefaultStore(env.DB);
-        await defaults.set(provider, accountIds[provider], "api_key", null);
+        await defaults.set(provider, {
+          providerAccountId: accountIds[provider],
+          unattendedMode: "api_key",
+          actorId: null,
+        });
 
         await expect(resolveAutomationProviderAuth(env.DB, automation.id)).resolves.toEqual(
           expect.arrayContaining([
@@ -140,7 +148,11 @@ describe("Scheduler (integration)", () => {
           ])
         );
 
-        await defaults.set(provider, accountIds[provider], "provider_account", null);
+        await defaults.set(provider, {
+          providerAccountId: accountIds[provider],
+          unattendedMode: "provider_account",
+          actorId: null,
+        });
         await expect(resolveAutomationProviderAuth(env.DB, automation.id)).resolves.toEqual(
           expect.arrayContaining([
             expect.objectContaining({
@@ -153,6 +165,37 @@ describe("Scheduler (integration)", () => {
         );
       }
     );
+  });
+
+  describe("round-robin provider policy", () => {
+    it("rotates unpinned unattended runs across the provider's active accounts", async () => {
+      const accounts = new ModelProviderAccountStore(env.DB);
+      const defaults = new ProviderDefaultStore(env.DB);
+      const first = "00000000000000000000000000000011";
+      const second = "00000000000000000000000000000012";
+      await accounts.create({ id: first, provider: "openai", displayName: "first", now: 10 });
+      await accounts.create({ id: second, provider: "openai", displayName: "second", now: 20 });
+      await defaults.set("openai", {
+        providerAccountId: first,
+        unattendedMode: "provider_account",
+        selectionStrategy: "round_robin",
+        actorId: null,
+      });
+      const automation = makeAutomation({ id: "auto-rotation" });
+      await new AutomationStore(env.DB).create(automation);
+
+      const picks: unknown[] = [];
+      for (let run = 0; run < 3; run += 1) {
+        const resolved = await resolveAutomationProviderAuth(env.DB, automation.id);
+        const openai = resolved.find((auth) => auth.provider === "openai");
+        expect(openai).toMatchObject({
+          authMode: "provider_account",
+          selectionSource: "round_robin",
+        });
+        picks.push((openai as { providerAccountId: string }).providerAccountId);
+      }
+      expect(picks).toEqual([first, second, first]);
+    });
   });
 
   // ─── Run complete callback ────────────────────────────────────────────────

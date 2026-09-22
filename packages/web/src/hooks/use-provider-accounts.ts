@@ -23,6 +23,7 @@ import {
   type ConnectModelProviderAccountRequest,
   type ModelProviderAccount,
   type ModelProviderAccountDefault,
+  type ProviderAccountSelectionStrategy,
   type ProviderAuthorizationCodeStatusResponse,
   type ReconnectModelProviderAccountRequest,
   type StartProviderAuthorizationCodeRequest,
@@ -281,7 +282,9 @@ export async function archiveProviderAccount(id: string) {
 export async function setProviderAccountDefault(
   provider: SubscriptionProviderId,
   providerAccountId: string,
-  unattendedMode: "provider_account" | "api_key"
+  unattendedMode: "provider_account" | "api_key",
+  /** Omitted keeps the stored strategy, so moving the default leaves rotation alone. */
+  selectionStrategy?: ProviderAccountSelectionStrategy
 ) {
   return (
     await requestProviderResource(
@@ -289,7 +292,11 @@ export async function setProviderAccountDefault(
       modelProviderAccountDefaultResponseSchema,
       {
         method: "PUT",
-        body: { providerAccountId, unattendedMode },
+        body: {
+          providerAccountId,
+          unattendedMode,
+          ...(selectionStrategy === undefined ? {} : { selectionStrategy }),
+        },
       }
     )
   ).default;

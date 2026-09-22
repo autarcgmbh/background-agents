@@ -23,6 +23,7 @@ interface AccountRow {
   updated_by: string | null;
   last_verified_at: number | null;
   last_used_at: number | null;
+  last_selected_at: number | null;
   created_at: number;
   updated_at: number;
   archived_at: number | null;
@@ -301,6 +302,38 @@ export class ModelProviderAccountStore {
       .bind(now, actorId, now, id)
       .run();
     return result.meta.changes > 0;
+  }
+
+  /**
+   * Round-robin pick: bind the provider's least recently selected active
+   * account and stamp it, in one statement. The subquery and the update run
+   * atomically on every engine this store targets, so concurrent session
+   * creates cannot land on the same account. Never-selected accounts sort
+   * first, then the cycle proceeds by pointer age with created_at and id
+   * breaking same-millisecond ties. Returns null when no account is active.
+   *
+   * A session start is not an admin edit, so updated_at and lifecycle_version
+   * are deliberately left alone (unlike touchLastUsed).
+   */
+  async selectNextForRotation(
+    provider: ModelProviderId,
+    now = Date.now()
+  ): Promise<ModelProviderAccount | null> {
+    assertModelProviderId(provider);
+    const row = await this.db
+      .prepare(
+        `UPDATE model_provider_accounts SET last_selected_at = ?
+         WHERE id = (
+           SELECT id FROM model_provider_accounts
+           WHERE provider = ? AND status = 'active' AND archived_at IS NULL
+           ORDER BY COALESCE(last_selected_at, 0) ASC, created_at ASC, id ASC
+           LIMIT 1
+         )
+         RETURNING *`
+      )
+      .bind(now, provider)
+      .first<AccountRow>();
+    return row ? toAccount(row) : null;
   }
 
   async touchLastUsed(id: string, before: number, now = Date.now()): Promise<boolean> {

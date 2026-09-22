@@ -178,6 +178,7 @@ describe("provider account API response boundaries", () => {
       provider: "openai",
       providerAccountId: account.id,
       unattendedMode: "provider_account",
+      selectionStrategy: "default",
       createdBy: null,
       updatedBy: null,
       createdAt: 1,
