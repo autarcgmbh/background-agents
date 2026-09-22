@@ -406,6 +406,58 @@ describe("CallbackNotificationService", () => {
     });
   });
 
+  describe("notifyComplete — agent conversation id", () => {
+    beforeEach(() => {
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: JSON.stringify(LINEAR_CALLBACK_CONTEXT),
+        source: "linear",
+      });
+      harness.linearBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+    });
+
+    it("carries the conversation id so Linear can link it in Grafana", async () => {
+      vi.mocked(harness.repository.getSession).mockReturnValue({
+        agent_session_id: "ses_abc123",
+      } as never);
+
+      await harness.service.notifyComplete("msg-1", true);
+
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).toMatchObject({ agentConversationId: "ses_abc123" });
+      expect(linearCompletionCallbackSchema.safeParse(body).success).toBe(true);
+      // The field is inside the signed payload, not bolted on after signing.
+      expect(await verifyCallbackSignature(body, "test-secret")).toBe(true);
+    });
+
+    it("omits it when the turn ended before the agent opened a conversation", async () => {
+      vi.mocked(harness.repository.getSession).mockReturnValue({
+        agent_session_id: null,
+      } as never);
+
+      await harness.service.notifyComplete("msg-1", false, "boom");
+
+      const body = JSON.parse(String(harness.linearBot.fetch.mock.calls[0][1]?.body));
+      expect(body).not.toHaveProperty("agentConversationId");
+      expect(linearCompletionCallbackSchema.safeParse(body).success).toBe(true);
+    });
+
+    it("stays off the Slack payload, whose schema does not carry it", async () => {
+      vi.mocked(harness.repository.getSession).mockReturnValue({
+        agent_session_id: "ses_abc123",
+      } as never);
+      vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({
+        callback_context: JSON.stringify({ channel: "C123" }),
+        source: "slack",
+      });
+      harness.slackBot.fetch.mockResolvedValue(new Response("ok", { status: 200 }));
+
+      await harness.service.notifyComplete("msg-1", true);
+
+      const body = JSON.parse(String(harness.slackBot.fetch.mock.calls[0][1]?.body));
+      expect(body).not.toHaveProperty("agentConversationId");
+    });
+  });
+
   describe("notifyProgress", () => {
     const linearContext = () => {
       vi.mocked(harness.repository.getMessageCallbackContext).mockReturnValue({

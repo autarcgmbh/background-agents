@@ -114,6 +114,14 @@ export const linearCompletionCallbackPayloadSchema = z.strictObject({
   success: z.boolean(),
   error: z.string().optional(),
   terminationReason: linearTerminationReasonSchema.optional(),
+  /**
+   * The coding agent's own conversation id, which Grafana Agent Observability
+   * files the conversation under. Deliberately NOT called `agentSessionId`:
+   * everywhere else in the Linear boundary that name means Linear's agent
+   * session, and `context.agentSessionId` on this very payload is one of
+   * those. Absent when the turn ended before the agent opened a conversation.
+   */
+  agentConversationId: nonEmptyStringSchema.optional(),
   timestamp: z.number().refine(Number.isFinite),
   context: linearCallbackContextSchema,
 });

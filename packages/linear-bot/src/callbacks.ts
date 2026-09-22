@@ -18,6 +18,7 @@ import {
 } from "./utils/linear-client";
 import { extractAgentResponse, formatAgentResponse } from "./completion/extractor";
 import { resolveAppName } from "@open-inspect/shared/app-name";
+import { buildGrafanaConversationUrl } from "@open-inspect/shared/grafana";
 import { cancelPlanFrom, makePlan } from "./plan";
 import { createLogger } from "./logger";
 import { createStartCallbackRouter } from "./callbacks/start-callback";
@@ -26,6 +27,30 @@ import { rejectInvalidCallback } from "./callbacks/reject-invalid-callback";
 import { markMessageCompleted, touchKeepalive } from "./kv-store";
 
 const log = createLogger("callback");
+
+/**
+ * The links Linear shows on the agent session once a turn finishes: the
+ * session itself, its pull request, and its Grafana conversation.
+ *
+ * Session creation can only set the first — the PR does not exist yet and the
+ * agent has not opened a conversation — so this is where the other two arrive.
+ * Anything unavailable is left out rather than rendered as a dead link.
+ */
+export function buildSessionExternalUrls(params: {
+  env: Env;
+  sessionId: string;
+  prUrl?: string | null;
+  /** The coding agent's conversation id, not Linear's agent session id. */
+  agentConversationId?: string | null;
+}): Array<{ label: string; url: string }> {
+  const { env, sessionId, prUrl, agentConversationId } = params;
+  const grafanaUrl = buildGrafanaConversationUrl(env.GRAFANA_URL, agentConversationId);
+  return [
+    { label: "View Session", url: `${env.WEB_APP_URL}/session/${sessionId}` },
+    ...(prUrl ? [{ label: "Pull Request", url: prUrl }] : []),
+    ...(grafanaUrl ? [{ label: "Grafana", url: grafanaUrl }] : []),
+  ];
+}
 
 export function formatCompletionComment(
   appName: string,
@@ -350,13 +375,17 @@ async function handleCompletionCallback(
           plan: makePlan(payload.success ? "completed" : "failed"),
         });
 
-        // Update externalUrls with PR link if available
+        // Republish externalUrls now that the PR and the Grafana conversation
+        // exist. Skipped when neither does: creation already published the
+        // session link on its own, so the call would change nothing.
         const prArtifact = agentResponse.artifacts.find((a) => a.type === "pr" && a.url);
-        if (prArtifact) {
-          const urls = [
-            { label: "View Session", url: `${env.WEB_APP_URL}/session/${sessionId}` },
-            { label: "Pull Request", url: prArtifact.url },
-          ];
+        const urls = buildSessionExternalUrls({
+          env,
+          sessionId,
+          prUrl: prArtifact?.url,
+          agentConversationId: payload.agentConversationId,
+        });
+        if (urls.length > 1) {
           await updateAgentSession(client, context.agentSessionId, { externalUrls: urls });
         }
 

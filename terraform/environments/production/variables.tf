@@ -699,7 +699,7 @@ variable "app_icon_url" {
 }
 
 variable "grafana_url" {
-  description = "Optional Grafana stack origin (e.g. https://mystack.grafana.net). Sessions link to their Grafana Agent Observability conversation when set; see docs/AGENT_OBSERVABILITY.md. Leave empty to omit the link."
+  description = "Optional Grafana stack origin (e.g. https://mystack.grafana.net). When set, sessions link to their Grafana Agent Observability conversation from the web UI and from Linear agent sessions; see docs/AGENT_OBSERVABILITY.md. Leave empty to omit the link."
   type        = string
   default     = ""
 }

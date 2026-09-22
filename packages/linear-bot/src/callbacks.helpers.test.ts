@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { LinearCompletionCallback } from "@open-inspect/shared/types/session-api";
 import {
+  buildSessionExternalUrls,
   formatCompletionComment,
   formatToolAction,
   formatToolResult,
   isUserInitiatedTermination,
   TOOL_RESULT_MAX_CHARS,
 } from "./callbacks";
+import type { Env } from "./types";
 
 // ─── formatToolAction ────────────────────────────────────────────────────────
 
@@ -227,5 +229,71 @@ describe("formatCompletionComment", () => {
     expect(formatCompletionComment("Open-Inspect", true, "ok")).toBe(
       "## 🤖 Open-Inspect completed\n\nok"
     );
+  });
+});
+
+// ─── buildSessionExternalUrls ────────────────────────────────────────────────
+
+describe("buildSessionExternalUrls", () => {
+  const env = (grafanaUrl?: string) =>
+    ({ WEB_APP_URL: "https://app.example.com", GRAFANA_URL: grafanaUrl }) as Env;
+
+  it("links the session, its PR and its Grafana conversation", () => {
+    expect(
+      buildSessionExternalUrls({
+        env: env("https://autarc.grafana.net"),
+        sessionId: "sess-1",
+        prUrl: "https://github.com/acme/web/pull/42",
+        agentConversationId: "ses_abc123",
+      })
+    ).toEqual([
+      { label: "View Session", url: "https://app.example.com/session/sess-1" },
+      { label: "Pull Request", url: "https://github.com/acme/web/pull/42" },
+      {
+        label: "Grafana",
+        url: "https://autarc.grafana.net/a/grafana-agento11y-app/conversations/ses_abc123",
+      },
+    ]);
+  });
+
+  it("omits Grafana when the deployment exports nothing to it", () => {
+    expect(
+      buildSessionExternalUrls({
+        env: env(),
+        sessionId: "sess-1",
+        agentConversationId: "ses_abc123",
+      })
+    ).toEqual([{ label: "View Session", url: "https://app.example.com/session/sess-1" }]);
+  });
+
+  it("omits Grafana when the turn ended before the agent opened a conversation", () => {
+    expect(
+      buildSessionExternalUrls({
+        env: env("https://autarc.grafana.net"),
+        sessionId: "sess-1",
+        prUrl: "https://github.com/acme/web/pull/42",
+      })
+    ).toEqual([
+      { label: "View Session", url: "https://app.example.com/session/sess-1" },
+      { label: "Pull Request", url: "https://github.com/acme/web/pull/42" },
+    ]);
+  });
+
+  it("carries the Grafana link on a session that produced no PR", () => {
+    // A question-answering turn: nothing to open on the SCM, but the
+    // conversation is exactly what someone debugging it wants.
+    expect(
+      buildSessionExternalUrls({
+        env: env("https://autarc.grafana.net"),
+        sessionId: "sess-1",
+        agentConversationId: "ses_abc123",
+      })
+    ).toEqual([
+      { label: "View Session", url: "https://app.example.com/session/sess-1" },
+      {
+        label: "Grafana",
+        url: "https://autarc.grafana.net/a/grafana-agento11y-app/conversations/ses_abc123",
+      },
+    ]);
   });
 });

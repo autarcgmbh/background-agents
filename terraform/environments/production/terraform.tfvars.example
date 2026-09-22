@@ -322,9 +322,10 @@ project_root = "../../../"
 #          "https://cdn.example.com/logo.svg".
 # app_icon_url = ""
 
-# Optional Grafana stack origin. When set, each session links to its Grafana
-# Agent Observability conversation from the session details sidebar. Requires
-# the AGENTO11Y_* secrets to be configured too — see docs/AGENT_OBSERVABILITY.md.
+# Optional Grafana stack origin. When set, sessions link to their Grafana Agent
+# Observability conversation from the session details sidebar and from the
+# external links on their Linear agent session. Requires the AGENTO11Y_* secrets
+# to be configured too — see docs/AGENT_OBSERVABILITY.md.
 # Example: "https://mystack.grafana.net"
 # grafana_url = ""
 

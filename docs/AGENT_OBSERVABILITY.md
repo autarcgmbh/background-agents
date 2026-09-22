@@ -75,18 +75,27 @@ No historical backfill runs automatically. The old `sessions.total_tokens` colum
 
 ## Open in Grafana
 
-Set the `grafana_url` Terraform variable (or `NEXT_PUBLIC_GRAFANA_URL` when running the web app
-yourself) to your stack origin, for example `https://mystack.grafana.net`. The session details
-sidebar then shows an **Open in Grafana** link pointing at that session's conversation:
+Set the `grafana_url` Terraform variable to your stack origin, for example
+`https://mystack.grafana.net`. Sessions then link straight at their Grafana conversation:
 
 ```
 <grafana_url>/a/grafana-agento11y-app/conversations/<agentSessionId>
 ```
 
-It is a `NEXT_PUBLIC_*` variable, so it is inlined into the client bundle at build time — rebuild
-the web app after changing it. The link appears only once the session has an agent conversation ID,
-so a session that has not been prompted yet shows no link. Leaving the variable empty omits the link
-entirely, which is what a deployment that exports nothing to Grafana wants.
+Terraform passes it to the web app as `NEXT_PUBLIC_GRAFANA_URL` and to the Linear bot as
+`GRAFANA_URL`. Only the origin matters: a URL pasted with a path (the setup page, say) is reduced to
+its origin, so you can copy it straight out of the address bar.
+
+Two surfaces carry the link:
+
+- **Session details sidebar** — an **Open in Grafana** row, next to the model and branch metadata.
+- **Linear agent sessions** — a **Grafana** entry in the session's external links, published
+  alongside **View Session** and **Pull Request** when a turn finishes.
+
+`NEXT_PUBLIC_*` vars are inlined into the client bundle at build time, so rebuild the web app after
+changing the value. The link appears only once the session has an agent conversation ID, so a
+session that has not been prompted yet shows none. Leaving the variable empty omits the link
+everywhere, which is what a deployment that exports nothing to Grafana wants.
 
 ## Verify and diagnose
 
