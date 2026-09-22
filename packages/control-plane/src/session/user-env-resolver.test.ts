@@ -89,6 +89,12 @@ class FakeStatement implements SqlStatement {
   }
 
   first<T = Record<string, unknown>>(): Promise<T | null> {
+    if (this.query === "SELECT user_id, scm_login FROM sessions WHERE id = ?") {
+      this.db.creatorLookupIds.push(this.bound[0]);
+      return this.db.creatorError
+        ? Promise.reject(this.db.creatorError)
+        : Promise.resolve(this.db.creatorRow as T | null);
+    }
     if (this.query.includes("FROM model_provider_accounts")) {
       return Promise.resolve((this.db.accountRow as T | null) ?? null);
     }
@@ -112,6 +118,9 @@ class FakeSqlDatabase implements SqlDatabase {
   providerAuthRows: D1Row[] = [];
   /** The bound provider account the pre-spawn check reads; null means removed. */
   accountRow: D1Row | null = null;
+  creatorRow: D1Row | null = null;
+  creatorError: Error | null = null;
+  creatorLookupIds: unknown[] = [];
   globalSecretRows: D1Row[] = [];
   readonly repoSecretRowsByRepoId = new Map<number, D1Row[]>();
   readonly environmentSecretRowsById = new Map<string, D1Row[]>();
@@ -293,6 +302,45 @@ function makeHarness(
 // ---------------------------------------------------------------------------
 
 describe("UserEnvResolver", () => {
+  describe("Grafana user attribution", () => {
+    it("uses the canonical creator id instead of the sandbox OS user", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows(API_KEY_MODES);
+      h.db.globalSecretRows = await secretRows({ AGENTO11Y_ENDPOINT: "https://grafana.test" });
+      h.db.creatorRow = { user_id: "canonical-alice", scm_login: "alice" };
+      expect(await h.resolver.getUserEnvVars()).toMatchObject({
+        AGENTO11Y_USER_ID: "canonical-alice",
+      });
+      expect(h.db.creatorLookupIds).toEqual([sessionRow().session_name]);
+    });
+
+    it("honors an explicitly configured user id without an extra lookup", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows(API_KEY_MODES);
+      h.db.globalSecretRows = await secretRows({
+        AGENTO11Y_ENDPOINT: "https://grafana.test",
+        AGENTO11Y_USER_ID: "service-account",
+      });
+      expect(await h.resolver.getUserEnvVars()).toMatchObject({
+        AGENTO11Y_USER_ID: "service-account",
+      });
+      expect(h.db.creatorLookupIds).toEqual([]);
+    });
+
+    it("continues without attribution when the optional lookup fails", async () => {
+      const h = makeHarness();
+      h.db.providerAuthRows = providerAuthRows(API_KEY_MODES);
+      h.db.globalSecretRows = await secretRows({ AGENTO11Y_ENDPOINT: "https://grafana.test" });
+      h.db.creatorError = new Error("database unavailable");
+      expect(await h.resolver.getUserEnvVars()).toMatchObject({ AGENTO11Y_USER_ID: "unknown" });
+      expect(h.logs).toContainEqual({
+        level: "warn",
+        msg: "agento11y.user_attribution_unavailable",
+        data: undefined,
+      });
+    });
+  });
+
   describe("missing session row", () => {
     it("returns undefined from getUserEnvVars after a warn, without touching D1", async () => {
       const h = makeHarness({ session: null });

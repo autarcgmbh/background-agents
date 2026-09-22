@@ -91,21 +91,7 @@ function harness(options: { session?: SessionRow | null } = {}) {
     messenger,
     sessionIndex,
     statusProjection,
-    parentSessions,
-    {
-      getUsageByModel: () => [
-        {
-          modelId: "anthropic/claude-opus-5",
-          usage: {
-            input: 1000,
-            output: 500,
-            cacheRead: 0,
-            cacheWrite: 0,
-            reasoning: 0,
-          },
-        },
-      ],
-    }
+    parentSessions
   );
 
   return {
@@ -211,13 +197,6 @@ describe("SessionStatusService.transition", () => {
 
     expect(h.sessionIndex.updateMetrics).toHaveBeenCalledWith("public-session-1", {
       totalCost: 2.5,
-      totalTokens: 1500,
-      usageByModel: [
-        {
-          modelId: "anthropic/claude-opus-5",
-          usage: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
-        },
-      ],
       activeDurationMs: 4500,
       messageCount: 3,
       prCount: 2,

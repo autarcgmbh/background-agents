@@ -2,25 +2,16 @@ import type {
   AnalyticsBreakdownBy,
   AnalyticsBreakdownEntry,
   AnalyticsBreakdownResponse,
-  AnalyticsComputedCost,
   AnalyticsSummaryResponse,
   AnalyticsTimeseriesResponse,
 } from "@open-inspect/shared/types/analytics";
 import type { SpawnSource } from "@open-inspect/shared/types/sessions";
 import type { SqlDatabase, SqlResult, SqlStatement } from "./sql-database";
-import {
-  rollupUsageCost,
-  type ModelTokenUsage,
-  type UsageCostRollup,
-} from "@open-inspect/shared/model-pricing";
 import { MS_PER_DAY, utcDateFromDayIndex } from "./utc-day";
 import { z } from "zod";
 
 /** Spawn sources that represent direct human-initiated sessions. */
 export const HUMAN_SPAWN_SOURCES: SpawnSource[] = ["user", "slack-bot", "linear-bot", "github-bot"];
-
-const REPO_GROUP_EXPRESSION =
-  "CASE WHEN s.repo_owner IS NULL OR s.repo_name IS NULL THEN NULL ELSE s.repo_owner || '/' || s.repo_name END";
 
 export interface AnalyticsFilters {
   startAt: number;
@@ -51,23 +42,9 @@ const timeseriesRowSchema = z.object({
 
 type TimeseriesRow = z.infer<typeof timeseriesRowSchema>;
 
-const modelUsageRowSchema = z.object({
-  key: z.string().nullable(),
-  model_id: z.string(),
-  input_tokens: z.number(),
-  output_tokens: z.number(),
-  cache_read_tokens: z.number(),
-  cache_write_tokens: z.number(),
-  reasoning_tokens: z.number(),
-});
-
 const breakdownRowSchema = z.object({
   key: z.string().nullable(),
   display_name: z.string().nullable().optional(),
-  total_tokens: z.number().nullable().optional(),
-  repository: z.string().nullable().optional(),
-  user_name: z.string().optional(),
-  status: z.string().optional(),
   sessions: z.number(),
   completed: z.number(),
   failed: z.number(),
@@ -194,88 +171,22 @@ export class AnalyticsStore {
     return this.decodeBreakdown(result);
   }
 
-  /**
-   * How a breakdown buckets sessions. Shared with `prepareModelUsage` so the
-   * cost of a bucket is summed over exactly the sessions the bucket counts.
-   */
-  private groupExpression(by: AnalyticsBreakdownBy): string {
-    if (by === "user") return "COALESCE(s.user_id, NULLIF(s.scm_login, ''), '__unknown__')";
-    if (by === "session") return "s.id";
-    return REPO_GROUP_EXPRESSION;
-  }
-
-  /**
-   * Token usage per bucket per model, over the same window and spawn-source
-   * filter as `prepareBreakdown`. Pricing happens in `decodeModelUsage` rather
-   * than in SQL, so a corrected rate reprices history on the next read.
-   */
-  prepareModelUsage(filters: AnalyticsFilters, by: AnalyticsBreakdownBy): SqlStatement {
-    const sources = filters.spawnSources ?? HUMAN_SPAWN_SOURCES;
-    const placeholders = sources.map(() => "?").join(", ");
-    return this.db
-      .prepare(
-        `SELECT
-           ${this.groupExpression(by)} AS key,
-           m.model_id AS model_id,
-           COALESCE(SUM(m.input_tokens), 0) AS input_tokens,
-           COALESCE(SUM(m.output_tokens), 0) AS output_tokens,
-           COALESCE(SUM(m.cache_read_tokens), 0) AS cache_read_tokens,
-           COALESCE(SUM(m.cache_write_tokens), 0) AS cache_write_tokens,
-           COALESCE(SUM(m.reasoning_tokens), 0) AS reasoning_tokens
-         FROM session_model_usage m
-         JOIN sessions s ON s.id = m.session_id
-         WHERE s.created_at >= ? AND s.created_at < ?
-           AND s.spawn_source IN (${placeholders})
-         GROUP BY key, m.model_id`
-      )
-      .bind(filters.startAt, filters.endAt, ...sources);
-  }
-
-  /** Priced usage per bucket key, for merging into a breakdown. */
-  decodeModelUsage(result: SqlResult): Map<string, UsageCostRollup> {
-    const byKey = new Map<string, Array<[string, ModelTokenUsage]>>();
-    for (const row of parseRows(result.results, modelUsageRowSchema, "analytics model usage row")) {
-      const key = row.key ?? NO_REPOSITORY_ANALYTICS_KEY;
-      const entries = byKey.get(key) ?? [];
-      entries.push([
-        row.model_id,
-        {
-          input: row.input_tokens,
-          output: row.output_tokens,
-          cacheRead: row.cache_read_tokens,
-          cacheWrite: row.cache_write_tokens,
-          reasoning: row.reasoning_tokens,
-        },
-      ]);
-      byKey.set(key, entries);
-    }
-    return new Map([...byKey].map(([key, entries]) => [key, rollupUsageCost(entries)]));
-  }
-
   prepareBreakdown(filters: AnalyticsFilters, by: AnalyticsBreakdownBy): SqlStatement {
     const isUserBreakdown = by === "user";
-    const isSessionBreakdown = by === "session";
-    const repoGroupExpression = REPO_GROUP_EXPRESSION;
+    const repoGroupExpression =
+      "CASE WHEN s.repo_owner IS NULL OR s.repo_name IS NULL THEN NULL ELSE s.repo_owner || '/' || s.repo_name END";
 
-    const groupExpression = this.groupExpression(by);
+    const groupExpression = isUserBreakdown
+      ? "COALESCE(s.user_id, NULLIF(s.scm_login, ''), '__unknown__')"
+      : repoGroupExpression;
 
     const displayNameSelect = isUserBreakdown
       ? "COALESCE(MAX(NULLIF(u.display_name, '')), MAX(NULLIF(s.scm_login, '')), 'Unknown user') AS display_name,"
-      : isSessionBreakdown
-        ? `MAX(COALESCE(NULLIF(s.title, ''), s.id)) AS display_name,
-           MAX(${repoGroupExpression}) AS repository,
-           COALESCE(MAX(NULLIF(u.display_name, '')), MAX(NULLIF(s.scm_login, '')), 'Unknown user') AS user_name,
-           MAX(s.status) AS status,`
-        : "NULL AS display_name,";
+      : "NULL AS display_name,";
 
-    const joinClause =
-      isUserBreakdown || isSessionBreakdown ? "LEFT JOIN users u ON s.user_id = u.id" : "";
+    const joinClause = isUserBreakdown ? "LEFT JOIN users u ON s.user_id = u.id" : "";
 
-    const orderTail = isSessionBreakdown
-      ? "last_active DESC, key ASC"
-      : isUserBreakdown
-        ? "display_name ASC"
-        : "key ASC";
+    const orderTail = isUserBreakdown ? "display_name ASC" : "key ASC";
 
     const sources = filters.spawnSources ?? HUMAN_SPAWN_SOURCES;
     const placeholders = sources.map(() => "?").join(", ");
@@ -290,11 +201,10 @@ export class AnalyticsStore {
            COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
            COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled,
            COALESCE(SUM(total_cost), 0) AS cost,
-           SUM(total_tokens) AS total_tokens,
            COALESCE(SUM(pr_count), 0) AS prs,
            COALESCE(SUM(message_count), 0) AS message_count,
            COALESCE(
-             AVG(CASE WHEN ${isSessionBreakdown ? "1 = 1" : "status IN ('completed', 'failed', 'cancelled')"} THEN active_duration_ms END),
+             AVG(CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN active_duration_ms END),
              0
            ) AS avg_duration,
            MAX(s.updated_at) AS last_active
@@ -308,42 +218,6 @@ export class AnalyticsStore {
       .bind(filters.startAt, filters.endAt, ...sources);
   }
 
-  /** Attach each bucket's priced usage to its breakdown entry. */
-  mergeModelUsage(
-    breakdown: AnalyticsBreakdownResponse,
-    usage: Map<string, UsageCostRollup>
-  ): AnalyticsBreakdownResponse {
-    return {
-      entries: breakdown.entries.map((entry) => {
-        const rollup = usage.get(entry.key);
-        return rollup ? { ...entry, computedCost: toComputedCost(rollup) } : entry;
-      }),
-    };
-  }
-
-  /**
-   * One computed cost covering every bucket, for the dashboard summary. Models
-   * are re-aggregated across buckets so each appears once in the total.
-   */
-  totalComputedCost(byKey: Map<string, UsageCostRollup>): AnalyticsComputedCost {
-    const combined = new Map<string, ModelTokenUsage>();
-    for (const rollup of byKey.values()) {
-      for (const model of rollup.models) {
-        const current = combined.get(model.modelId);
-        if (!current) {
-          combined.set(model.modelId, { ...model.usage });
-          continue;
-        }
-        current.input += model.usage.input;
-        current.output += model.usage.output;
-        current.cacheRead += model.usage.cacheRead;
-        current.cacheWrite += model.usage.cacheWrite;
-        current.reasoning += model.usage.reasoning;
-      }
-    }
-    return toComputedCost(rollupUsageCost(combined));
-  }
-
   decodeBreakdown(result: SqlResult): AnalyticsBreakdownResponse {
     const entries: AnalyticsBreakdownEntry[] = parseRows(
       result.results,
@@ -352,10 +226,6 @@ export class AnalyticsStore {
     ).map((row) => ({
       key: row.key ?? NO_REPOSITORY_ANALYTICS_KEY,
       ...(row.display_name != null && { displayName: row.display_name }),
-      totalTokens: row.total_tokens ?? null,
-      ...(row.repository !== undefined && { repository: row.repository }),
-      ...(row.user_name !== undefined && { user: row.user_name }),
-      ...(row.status !== undefined && { status: row.status }),
       sessions: row.sessions,
       completed: row.completed,
       failed: row.failed,
@@ -392,20 +262,4 @@ function parseRows<Schema extends z.ZodType>(
     if (!parsed.success) throw new Error(`Invalid ${name}`);
     return parsed.data;
   });
-}
-
-export function toComputedCost(rollup: UsageCostRollup): AnalyticsComputedCost {
-  return {
-    costUsd: rollup.costUsd,
-    hasUnpricedModels: rollup.hasUnpricedModels,
-    models: rollup.models.map((model) => ({
-      modelId: model.modelId,
-      totalTokens: model.totalTokens,
-      inputTokens: model.usage.input,
-      outputTokens: model.usage.output,
-      cacheReadTokens: model.usage.cacheRead,
-      cacheWriteTokens: model.usage.cacheWrite,
-      costUsd: model.costUsd,
-    })),
-  };
 }

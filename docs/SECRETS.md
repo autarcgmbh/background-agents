@@ -79,6 +79,9 @@ The most common example:
 > precedence over it. With neither, Claude sessions fail with "Model not found." See
 > [Getting Started](GETTING_STARTED.md) for details.
 
+For agent usage, traces, and full conversation capture, configure the global `AGENTO11Y_*`
+connection values described in [Grafana Agent Observability](AGENT_OBSERVABILITY.md).
+
 ### When to use repository secrets
 
 Use repository secrets for credentials that are specific to a single project — database connection

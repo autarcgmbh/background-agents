@@ -16,7 +16,6 @@ import {
   DEFAULT_SESSION_LIST_OFFSET,
 } from "@open-inspect/shared/session-list-query";
 import type { SessionListRepository } from "@open-inspect/shared/types/repositories";
-import type { ModelTokenUsage } from "@open-inspect/shared/model-pricing";
 import {
   sessionModelProviderAuthSchema,
   SUBSCRIPTION_PROVIDER_IDS,
@@ -754,62 +753,19 @@ export class SessionIndexStore {
     id: string,
     metrics: {
       totalCost: number;
-      totalTokens?: number | null;
-      /**
-       * Cumulative usage for the whole session, per model. Undefined means the
-       * caller has nothing to say and the stored split is left alone; an empty
-       * array means the session reported no usage at all.
-       */
-      usageByModel?: Array<{ modelId: string; usage: ModelTokenUsage }>;
       activeDurationMs: number;
       messageCount: number;
       prCount: number;
     }
   ): Promise<boolean> {
-    const statements = [
-      this.db
-        .prepare(
-          `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?, total_tokens = COALESCE(?, total_tokens)
+    const result = await this.db
+      .prepare(
+        `UPDATE sessions SET total_cost = ?, active_duration_ms = ?, message_count = ?, pr_count = ?
          WHERE id = ?`
-        )
-        .bind(
-          metrics.totalCost,
-          metrics.activeDurationMs,
-          metrics.messageCount,
-          metrics.prCount,
-          metrics.totalTokens ?? null,
-          id
-        ),
-    ];
-    if (metrics.usageByModel) {
-      // The reported split is cumulative and authoritative, so the session's
-      // rows are replaced wholesale: a model dropped from the split (a step
-      // whose attribution was corrected) must not survive as a stale row.
-      statements.push(
-        this.db.prepare(`DELETE FROM session_model_usage WHERE session_id = ?`).bind(id)
-      );
-      for (const { modelId, usage } of metrics.usageByModel) {
-        statements.push(
-          this.db
-            .prepare(
-              `INSERT INTO session_model_usage
-                 (session_id, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`
-            )
-            .bind(
-              id,
-              modelId,
-              usage.input,
-              usage.output,
-              usage.cacheRead,
-              usage.cacheWrite,
-              usage.reasoning
-            )
-        );
-      }
-    }
-    const results = await this.db.batch(statements);
-    return (results[0]?.meta?.changes ?? 0) > 0;
+      )
+      .bind(metrics.totalCost, metrics.activeDurationMs, metrics.messageCount, metrics.prCount, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
   }
 
   /**

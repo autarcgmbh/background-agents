@@ -775,7 +775,6 @@ describe("boundary schemas", () => {
         messageId: "message-1",
         cost: 0.001,
         tokens: tokenUsage,
-        stepId: "step-1",
         reason: "end_turn",
         sandboxId: "sandbox-1",
         timestamp: 123,
@@ -784,7 +783,6 @@ describe("boundary schemas", () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.tokens).toEqual(tokenUsage);
-        expect(result.data.stepId).toBe("step-1");
       }
     });
 
