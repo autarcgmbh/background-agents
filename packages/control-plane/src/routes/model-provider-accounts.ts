@@ -473,12 +473,12 @@ modelProviderAccountRoutes.put("/model-provider-account-defaults/:provider", ACC
         new ModelProviderAccountStore(ctx.db),
         modelProviderAccountAdapterRegistry
       ).validateDefault(parsedProvider, body.providerAccountId);
-      await defaults.set(
-        parsedProvider,
-        body.providerAccountId,
-        body.unattendedMode,
-        ctx.principal.userId
-      );
+      await defaults.set(parsedProvider, {
+        providerAccountId: body.providerAccountId,
+        unattendedMode: body.unattendedMode,
+        selectionStrategy: body.selectionStrategy,
+        actorId: ctx.principal.userId,
+      });
       return json({ default: await defaults.get(parsedProvider) });
     } catch (cause) {
       if (cause instanceof ProviderAccountSelectionPolicyError) {

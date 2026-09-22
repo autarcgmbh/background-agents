@@ -34,7 +34,11 @@ describe("session provider auth persistence", () => {
       displayName: "Second",
       now: 20,
     });
-    await defaults.set("openai", FIRST_ACCOUNT_ID, "provider_account", null, 30);
+    await defaults.set(
+      "openai",
+      { providerAccountId: FIRST_ACCOUNT_ID, unattendedMode: "provider_account", actorId: null },
+      30
+    );
 
     const providerAuth = await resolveSessionProviderAuth(env.DB, {
       unattended: false,
@@ -70,7 +74,11 @@ describe("session provider auth persistence", () => {
       } as never
     );
 
-    await defaults.set("openai", SECOND_ACCOUNT_ID, "provider_account", null, 60);
+    await defaults.set(
+      "openai",
+      { providerAccountId: SECOND_ACCOUNT_ID, unattendedMode: "provider_account", actorId: null },
+      60
+    );
 
     await expect(new SessionIndexStore(env.DB).getCompleteProviderAuth(sessionId)).resolves.toEqual(
       [

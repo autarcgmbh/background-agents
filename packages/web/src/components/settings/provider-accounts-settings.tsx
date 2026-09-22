@@ -33,6 +33,7 @@ import { formatRelativeTime } from "@/lib/time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/ui/error-banner";
 import { MoreIcon, PlusIcon } from "@/components/ui/icons";
 import { SubscriptionProviderIcon } from "@/components/subscription-provider-icon";
@@ -640,6 +641,80 @@ export function ProviderAccountsSettings() {
                           </p>
                         </div>
                       )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="overflow-hidden rounded-md border border-border-muted">
+            <div className="border-b border-border-muted p-4">
+              <h3 className="font-medium text-foreground">Account rotation</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Spread new sessions across every connected account so subscriptions are used up
+                evenly. Each session that follows provider policy takes the least recently selected
+                active account; explicit selections and child sessions are unaffected.
+              </p>
+            </div>
+            <div className="divide-y divide-border-muted">
+              {providers.map((provider) => {
+                const providerDefault = defaults.find(
+                  (item) => item.provider === provider.provider
+                );
+                const activeCount = accounts.filter(
+                  (account) =>
+                    account.provider === provider.provider &&
+                    account.status === "active" &&
+                    !account.archivedAt
+                ).length;
+                const rotating = providerDefault?.selectionStrategy === "round_robin";
+                const switchId = `rotation-${provider.provider}`;
+                return (
+                  <div
+                    key={provider.provider}
+                    className="grid gap-3 p-4 sm:grid-cols-[minmax(8rem,0.6fr)_1fr] sm:items-center"
+                  >
+                    <div className="flex items-center gap-2 font-medium text-foreground">
+                      <SubscriptionProviderIcon
+                        provider={provider.provider}
+                        className="size-5 text-primary"
+                      />
+                      {provider.subscriptionName} accounts
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <Label htmlFor={switchId}>Rotate accounts across new sessions</Label>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {!providerDefault
+                            ? "Needs a default account first."
+                            : activeCount < 2 && !rotating
+                              ? "Connect at least two active accounts."
+                              : rotating
+                                ? `Rotating across ${activeCount} active ${activeCount === 1 ? "account" : "accounts"}; the default is the fallback.`
+                                : "Every session follows the default account."}
+                        </p>
+                      </div>
+                      <Switch
+                        id={switchId}
+                        checked={rotating}
+                        disabled={
+                          !canManage || saving || !providerDefault || (activeCount < 2 && !rotating)
+                        }
+                        onCheckedChange={(checked) => {
+                          if (!providerDefault || operationInFlightRef.current) return;
+                          void run(
+                            () =>
+                              setProviderAccountDefault(
+                                provider.provider,
+                                providerDefault.providerAccountId,
+                                providerDefault.unattendedMode,
+                                checked ? "round_robin" : "default"
+                              ),
+                            "Account rotation updated"
+                          );
+                        }}
+                      />
                     </div>
                   </div>
                 );

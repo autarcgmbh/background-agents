@@ -39,8 +39,8 @@ secrets, while provider auth rows make the choice between account and API-key mo
 | Providers           | OpenAI and xAI behind provider-specific credential adapters.                                      |
 | Ownership           | Installation-wide, matching the current single-tenant trust model; retain creator audit metadata. |
 | Credentials         | Separate encrypted credential row with a versioned, provider-validated payload.                   |
-| Defaults            | At most one installation-wide default account per provider.                                       |
-| Resolution          | Explicit auth mode, unattended policy when relevant, default account, then legacy compatibility.  |
+| Defaults            | One installation-wide default per provider, optionally rotating over the provider's accounts.     |
+| Resolution          | Explicit auth mode, unattended policy, round-robin when enabled, default, then legacy fallback.   |
 | Sessions            | Pin provider auth rows at creation; never consult moving defaults during token refresh.           |
 | Provider switching  | Snapshot auth for each configured subscription provider so later model changes are stable.        |
 | Children            | Inherit all parent auth rows; agent child-spawn requests cannot override them.                    |
@@ -90,7 +90,8 @@ auditable.
 
 ## Non-Goals
 
-- Round-robin, random, quota-aware, or failure-based load balancing.
+- Random, quota-aware, or failure-based load balancing. (Round-robin over a provider's active
+  accounts is an opt-in default strategy; it rotates at session creation only and never fails over.)
 - Automatically moving an active session to another account.
 - Combining allowance from multiple provider subscriptions.
 - Guaranteeing access to undocumented provider quota or billing endpoints.

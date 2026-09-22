@@ -90,6 +90,7 @@ describe("ProviderAuthControls menu", () => {
           provider: "openai",
           providerAccountId: account.id,
           unattendedMode: "provider_account",
+          selectionStrategy: "default",
           createdBy: null,
           updatedBy: null,
           createdAt: 1,
@@ -107,6 +108,33 @@ describe("ProviderAuthControls menu", () => {
     expect(screen.getByTitle("OpenAI")).toBeInTheDocument();
   });
 
+  it("names rotation rather than one account when the default rotates", () => {
+    render(
+      <ProviderAuthControls
+        variant="menu"
+        provider="openai"
+        accounts={[account]}
+        defaultValue={{
+          provider: "openai",
+          providerAccountId: account.id,
+          unattendedMode: "provider_account",
+          selectionStrategy: "round_robin",
+          createdBy: null,
+          updatedBy: null,
+          createdAt: 1,
+          updatedAt: 1,
+        }}
+        onChange={vi.fn()}
+      />
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "OpenAI authentication options, Rotating accounts",
+      })
+    ).toBeInTheDocument();
+  });
+
   it("identifies an unavailable default account in the compact trigger's accessible label", () => {
     render(
       <ProviderAuthControls
@@ -117,6 +145,7 @@ describe("ProviderAuthControls menu", () => {
           provider: "openai",
           providerAccountId: account.id,
           unattendedMode: "provider_account",
+          selectionStrategy: "default",
           createdBy: null,
           updatedBy: null,
           createdAt: 1,
@@ -143,6 +172,7 @@ describe("ProviderAuthControls menu", () => {
           provider: "openai",
           providerAccountId: account.id,
           unattendedMode: "api_key",
+          selectionStrategy: "default",
           createdBy: null,
           updatedBy: null,
           createdAt: 1,
@@ -248,6 +278,7 @@ describe("ProviderAuthControls harness capabilities", () => {
           provider: "anthropic",
           providerAccountId: anthropicAccount.id,
           unattendedMode: "provider_account",
+          selectionStrategy: "default",
           createdBy: null,
           updatedBy: null,
           createdAt: 1,

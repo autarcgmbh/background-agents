@@ -41,6 +41,15 @@ In the OpenAI section of **Settings > Provider Accounts**:
      subscription account.
    - **Use API key** keeps unattended launches on the existing API-key path.
 
+3. Optionally turn on **Rotate accounts across new sessions** under **Account rotation**. Each new
+   session that follows provider policy (interactive sessions without an explicit choice, and
+   unattended launches in **Use default account** mode) then binds the least recently selected
+   active ChatGPT account, so every connected subscription is drawn on evenly. Explicit selections
+   and child sessions are unaffected, and the default account remains the fallback. Disabled,
+   archived, and reconnect-required accounts leave the rotation until they are active again. The
+   default account itself cannot be disabled while it is the default: make another account the
+   default first to take it out of the rotation.
+
 Defaults are resolved when a session starts. Changing them does not move a running session to a
 different paid account.
 

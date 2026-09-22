@@ -535,6 +535,7 @@ describe("ProviderAccountsSettings", () => {
         provider: "openai",
         providerAccountId: account.id,
         unattendedMode: "provider_account",
+        selectionStrategy: "default",
         createdBy: null,
         updatedBy: null,
         createdAt: 1,
@@ -555,6 +556,7 @@ describe("ProviderAccountsSettings", () => {
         provider: "openai",
         providerAccountId: account.id,
         unattendedMode: "api_key",
+        selectionStrategy: "default",
         createdBy: null,
         updatedBy: null,
         createdAt: 1,
@@ -567,6 +569,104 @@ describe("ProviderAccountsSettings", () => {
       "No account (API key)"
     );
     expect(screen.queryByText("Default for automation")).not.toBeInTheDocument();
+  });
+
+  describe("account rotation", () => {
+    const providerDefault: ModelProviderAccountDefault = {
+      provider: "openai",
+      providerAccountId: account.id,
+      unattendedMode: "provider_account",
+      selectionStrategy: "default",
+      createdBy: null,
+      updatedBy: null,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const backup = { ...account, id: "c".repeat(32), displayName: "Backup ChatGPT" };
+
+    it("needs a default and a second active account before it can be switched on", () => {
+      render(<ProviderAccountsSettings />);
+      const switches = screen.getAllByRole("switch", {
+        name: "Rotate accounts across new sessions",
+      });
+      expect(switches).toHaveLength(3);
+      for (const control of switches) expect(control).toBeDisabled();
+      expect(screen.getAllByText("Needs a default account first.")).toHaveLength(3);
+
+      cleanup();
+      defaultsResult = [providerDefault];
+      render(<ProviderAccountsSettings />);
+      expect(
+        screen.getAllByRole("switch", { name: "Rotate accounts across new sessions" })[0]
+      ).toBeDisabled();
+      expect(screen.getByText("Connect at least two active accounts.")).toBeInTheDocument();
+
+      cleanup();
+      accountsResult = [account, backup];
+      render(<ProviderAccountsSettings />);
+      expect(
+        screen.getAllByRole("switch", { name: "Rotate accounts across new sessions" })[0]
+      ).toBeEnabled();
+    });
+
+    it("turns rotation on and off through the provider default", async () => {
+      accountsResult = [account, backup];
+      defaultsResult = [providerDefault];
+      render(<ProviderAccountsSettings />);
+
+      fireEvent.click(
+        screen.getAllByRole("switch", { name: "Rotate accounts across new sessions" })[0]
+      );
+      await waitFor(() => {
+        expect(setDefault).toHaveBeenCalledWith(
+          "openai",
+          account.id,
+          "provider_account",
+          "round_robin"
+        );
+      });
+      expect(toast.success).toHaveBeenCalledWith("Account rotation updated");
+
+      cleanup();
+      setDefault.mockClear();
+      defaultsResult = [{ ...providerDefault, selectionStrategy: "round_robin" }];
+      render(<ProviderAccountsSettings />);
+      const control = screen.getAllByRole("switch", {
+        name: "Rotate accounts across new sessions",
+      })[0];
+      expect(control).toBeChecked();
+      expect(
+        screen.getByText("Rotating across 2 active accounts; the default is the fallback.")
+      ).toBeInTheDocument();
+      fireEvent.click(control);
+      await waitFor(() => {
+        expect(setDefault).toHaveBeenCalledWith(
+          "openai",
+          account.id,
+          "provider_account",
+          "default"
+        );
+      });
+    });
+
+    it("stays available to switch off when only one account is still active", () => {
+      accountsResult = [account, { ...backup, status: "disabled" }];
+      defaultsResult = [{ ...providerDefault, selectionStrategy: "round_robin" }];
+      render(<ProviderAccountsSettings />);
+      expect(
+        screen.getAllByRole("switch", { name: "Rotate accounts across new sessions" })[0]
+      ).toBeEnabled();
+    });
+
+    it("is read-only without the manage permission", () => {
+      allowedPermissions = new Set(["provider_accounts.read"]);
+      accountsResult = [account, backup];
+      defaultsResult = [providerDefault];
+      render(<ProviderAccountsSettings />);
+      expect(
+        screen.getAllByRole("switch", { name: "Rotate accounts across new sessions" })[0]
+      ).toBeDisabled();
+    });
   });
 
   it("sets the provider default from the account row", async () => {
@@ -598,6 +698,7 @@ describe("ProviderAccountsSettings", () => {
         provider: "openai",
         providerAccountId: account.id,
         unattendedMode: "provider_account",
+        selectionStrategy: "default",
         createdBy: null,
         updatedBy: null,
         createdAt: 1,

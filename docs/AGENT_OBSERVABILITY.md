@@ -45,6 +45,8 @@ When the four connection values are present, the runtime defaults to:
 | Agent version           | The host version reported by the official plugin                                 |
 | User                    | Session creator's canonical user ID, falling back to SCM login or `unknown`      |
 | Repository tag          | Primary `owner/name`, including nested namespaces; `none` for repo-less sessions |
+| Provider account tags   | `provider_account` (display name) and `provider_account_id` when the session's   |
+|                         | model runs on a connected subscription account; absent for API-key sessions      |
 | Automatic metric tags   | `user,repo`                                                                      |
 | Local receiver / guards | Disabled                                                                         |
 
@@ -58,6 +60,11 @@ To distinguish coding sessions from product agents in a shared stack, set:
 ```dotenv
 AGENTO11Y_TAGS=app=kirk,workload=internal-coding
 ```
+
+The provider account tags name the account bound for the session's model when the sandbox starts, so
+a rotating ChatGPT default (see [OpenAI models](OPENAI_MODELS.md)) can be read per subscription by
+filtering conversations on `provider_account`. Custom tags cannot be promoted to automatic metric
+labels; the plugin accepts only `user`, `repo`, and `branch` there.
 
 These tags reach conversations, traces, and client token/latency metrics. Grafana's derived
 `agento11y_generation_cost_usd_total` metric carries agent/model labels rather than custom tags;

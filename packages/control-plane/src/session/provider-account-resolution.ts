@@ -16,7 +16,7 @@ import {
 
 interface ProviderAccountResolutionStores {
   defaults: Pick<ProviderDefaultStore, "get">;
-  accounts: Pick<ModelProviderAccountStore, "getById">;
+  accounts: Pick<ModelProviderAccountStore, "getById" | "selectNextForRotation">;
   adapters: ProviderAccountAdapterLookup;
 }
 
@@ -82,6 +82,23 @@ async function resolveProvider(
   }
   if (input.unattended && providerDefault.unattendedMode === "api_key") {
     return apiKey(provider, "unattended_policy");
+  }
+
+  // Rotation sits after every guard that ends without an account, so the
+  // pointer only advances for a session that will actually bind one.
+  if (providerDefault.selectionStrategy === "round_robin") {
+    const rotated = await stores.accounts.selectNextForRotation(provider);
+    if (rotated) {
+      await policy.validateDefault(provider, rotated.id);
+      return {
+        provider,
+        authMode: "provider_account",
+        providerAccountId: rotated.id,
+        selectionSource: "round_robin",
+      };
+    }
+    // Nothing active to rotate over: fall through to the default, which
+    // reports the configuration error the same way it always has.
   }
 
   const account = await policy.validateDefault(provider, providerDefault.providerAccountId);

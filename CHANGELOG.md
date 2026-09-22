@@ -2,6 +2,17 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 22, 2026
+
+**Round-robin ChatGPT accounts.** A provider default can now rotate: with **Rotate accounts across
+new sessions** on in Settings → Provider Accounts, each new session that follows provider policy
+binds the least recently selected active account for that provider instead of always the default, so
+several ChatGPT (or SuperGrok / Claude) subscriptions are used up evenly. Rotation happens once, at
+session creation; explicit choices, child sessions, and the default's fallback role are unchanged.
+Grafana Agent Observability conversations and traces now carry `provider_account` and
+`provider_account_id` tags naming the subscription a session ran on. See
+[OpenAI models](docs/OPENAI_MODELS.md) and [Agent Observability](docs/AGENT_OBSERVABILITY.md).
+
 ## September 21, 2026
 
 **Grafana Agent Observability.** OpenCode and Claude sandboxes now support Grafana's pinned

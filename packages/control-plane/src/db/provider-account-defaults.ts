@@ -1,5 +1,6 @@
 import type {
   ModelProviderAccountDefault,
+  ProviderAccountSelectionStrategy,
   ProviderAuthMode,
 } from "@open-inspect/shared/types/provider-accounts";
 import {
@@ -15,6 +16,7 @@ interface DefaultRow {
   provider: string;
   provider_account_id: string;
   unattended_mode: ProviderUnattendedMode;
+  selection_strategy: ProviderAccountSelectionStrategy;
   created_by: string | null;
   updated_by: string | null;
   created_at: number;
@@ -27,6 +29,7 @@ function toDefault(row: DefaultRow): ProviderDefault {
     provider: row.provider,
     providerAccountId: row.provider_account_id,
     unattendedMode: row.unattended_mode,
+    selectionStrategy: row.selection_strategy,
     createdBy: row.created_by,
     updatedBy: row.updated_by,
     createdAt: row.created_at,
@@ -36,31 +39,55 @@ function toDefault(row: DefaultRow): ProviderDefault {
 
 export class ProviderDefaultConstraintError extends Error {}
 
+export interface SetProviderDefaultInput {
+  providerAccountId: string;
+  unattendedMode: ProviderUnattendedMode;
+  /** Omitted keeps the stored strategy; a fresh default starts on `default`. */
+  selectionStrategy?: ProviderAccountSelectionStrategy;
+  actorId: string | null;
+}
+
 export class ProviderDefaultStore {
   constructor(private readonly db: SqlDatabase) {}
 
   async set(
     provider: ModelProviderId,
-    providerAccountId: string,
-    unattendedMode: ProviderUnattendedMode,
-    actorId: string | null,
+    input: SetProviderDefaultInput,
     now = Date.now()
   ): Promise<void> {
     assertModelProviderId(provider);
+    const strategy = input.selectionStrategy ?? null;
     const result = await this.db
       .prepare(
         `INSERT INTO model_provider_account_defaults (
-           provider, provider_account_id, unattended_mode, created_by, updated_by, created_at, updated_at
+           provider, provider_account_id, unattended_mode, selection_strategy,
+           created_by, updated_by, created_at, updated_at
          )
-         SELECT ?, id, ?, ?, ?, ?, ? FROM model_provider_accounts
+         SELECT ?, id, ?, COALESCE(?, 'default'), ?, ?, ?, ? FROM model_provider_accounts
          WHERE id = ? AND provider = ? AND status = 'active' AND archived_at IS NULL
          ON CONFLICT(provider) DO UPDATE SET
            provider_account_id = excluded.provider_account_id,
            unattended_mode = excluded.unattended_mode,
+           selection_strategy = CASE
+             WHEN ? IS NULL THEN model_provider_account_defaults.selection_strategy
+             ELSE ?
+           END,
            updated_by = excluded.updated_by,
            updated_at = excluded.updated_at`
       )
-      .bind(provider, unattendedMode, actorId, actorId, now, now, providerAccountId, provider)
+      .bind(
+        provider,
+        input.unattendedMode,
+        strategy,
+        input.actorId,
+        input.actorId,
+        now,
+        now,
+        input.providerAccountId,
+        provider,
+        strategy,
+        strategy
+      )
       .run();
     if (result.meta.changes === 0) {
       throw new ProviderDefaultConstraintError(`Default requires an active ${provider} account`);

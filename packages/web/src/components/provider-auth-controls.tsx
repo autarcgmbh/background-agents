@@ -86,7 +86,9 @@ export function ProviderAuthControls({
     !accountsSelectable || (unattended && defaultValue?.unattendedMode === "api_key")
       ? "No account"
       : defaultValue
-        ? (defaultAccount?.displayName ?? "Unavailable account")
+        ? defaultValue.selectionStrategy === "round_robin"
+          ? "Rotating accounts"
+          : (defaultAccount?.displayName ?? "Unavailable account")
         : undefined;
   const explicitAccount =
     value?.mode === "provider_account"

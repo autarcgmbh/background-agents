@@ -384,10 +384,18 @@ describe("provider account migration and stores", () => {
     ).rejects.toThrow();
 
     const defaults = new ProviderDefaultStore(env.DB);
-    await expect(defaults.set("xai", "openai-1", "provider_account", null, now)).rejects.toThrow(
-      /active xai account/i
+    await expect(
+      defaults.set(
+        "xai",
+        { providerAccountId: "openai-1", unattendedMode: "provider_account", actorId: null },
+        now
+      )
+    ).rejects.toThrow(/active xai account/i);
+    await defaults.set(
+      "openai",
+      { providerAccountId: "openai-1", unattendedMode: "provider_account", actorId: null },
+      now
     );
-    await defaults.set("openai", "openai-1", "provider_account", null, now);
     await expect(accounts.setStatus("openai-1", "disabled", null, now)).rejects.toThrow(
       /default account must remain active/i
     );
@@ -509,12 +517,17 @@ describe("provider account migration and stores", () => {
     });
 
     const defaults = new ProviderDefaultStore(env.DB);
-    await defaults.set("openai", "account-auth", "api_key", null, now);
+    await defaults.set(
+      "openai",
+      { providerAccountId: "account-auth", unattendedMode: "api_key", actorId: null },
+      now
+    );
     expect(await defaults.get("openai")).toEqual(
       expect.objectContaining({
         provider: "openai",
         providerAccountId: "account-auth",
         unattendedMode: "api_key",
+        selectionStrategy: "default",
       })
     );
 
