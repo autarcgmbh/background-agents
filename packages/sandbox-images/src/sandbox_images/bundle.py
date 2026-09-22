@@ -77,14 +77,17 @@ def validate_toolchain(tools: dict[str, Any]) -> None:
         raise ValueError("Unsupported image toolchain schema")
     if version(tools["opencode"]) < version(tools["opencodeMinimum"]):
         raise ValueError("OpenCode is below the image toolchain minimum")
-    for name in ("agentBrowser", "pnpm", "bun", "zod", "python"):
+    for name in ("agentBrowser", "agento11yOpencode", "pnpm", "bun", "zod", "python"):
         version(tools[name])
+    if not re.fullmatch(r"[a-f0-9]{64}", tools["agento11y"].get("claudePluginSha256", "")):
+        raise ValueError("agento11y Claude plugin must have a SHA-256 pin")
     if not re.fullmatch(r"[a-f0-9]{64}", tools.get("agentBrowserSha256", "")):
         raise ValueError("agent-browser native binary must have a SHA-256 pin")
     archives = [
         tools[name]
         for name in (
             "uv",
+            "agento11y",
             "codeServer",
             "ttyd",
             "chrome",
@@ -196,10 +199,12 @@ def pack_bundle(root: Path, provider: str, output_root: Path) -> PackedBundle:
             "PNPM_VERSION": toolchain["pnpm"],
             "AGENT_BROWSER_VERSION": toolchain["agentBrowser"],
             "AGENT_BROWSER_SHA256": toolchain["agentBrowserSha256"],
+            "AGENTO11Y_CLAUDE_PLUGIN_SHA256": toolchain["agento11y"]["claudePluginSha256"],
         }
         for name, key in (
             ("NODE", "node"),
             ("UV", "uv"),
+            ("AGENTO11Y", "agento11y"),
             ("CODE_SERVER", "codeServer"),
             ("TTYD", "ttyd"),
             ("FLUXBOX", "fluxbox"),

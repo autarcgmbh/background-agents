@@ -84,6 +84,13 @@ resource "cloudflare_worker" "this" {
 # 2. Create a Worker Version with modules and bindings
 # =============================================================================
 
+# Callers depend on their apply-time bundle build. A data source inherits that
+# dependency and reads the fresh artifact after the build; content_file instead
+# makes the Cloudflare provider hash a missing or stale file during planning.
+data "local_file" "script" {
+  filename = var.script_path
+}
+
 resource "cloudflare_worker_version" "this" {
   account_id          = var.account_id
   worker_id           = cloudflare_worker.this.id
@@ -94,9 +101,9 @@ resource "cloudflare_worker_version" "this" {
 
   modules = [
     {
-      name         = "index.js"
-      content_type = "application/javascript+module"
-      content_file = var.script_path
+      name           = "index.js"
+      content_type   = "application/javascript+module"
+      content_base64 = data.local_file.script.content_base64
     }
   ]
 

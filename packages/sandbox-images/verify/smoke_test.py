@@ -17,6 +17,25 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+PYTHON_VENV_PROBE = r"""
+import os, pathlib, subprocess, sys, tempfile
+python = f"python{sys.version_info.major}.{sys.version_info.minor}"
+home_bin = str(pathlib.Path.home() / ".local/bin")
+timeout_seconds = 30
+for path in (os.environ["PATH"], home_bin + ":" + os.environ["PATH"]):
+    # Repository installers may prepend ~/.local/bin to find a newly installed
+    # tool. Both PATH orders must create a project venv with its own working pip.
+    env = {**os.environ, "PATH": path}
+    with tempfile.TemporaryDirectory(prefix="openinspect-python-", dir="/workspace") as directory:
+        venv = pathlib.Path(directory) / ".venv"
+        result = subprocess.run([python, "-m", "venv", str(venv)], env=env, capture_output=True, text=True, timeout=timeout_seconds)
+        if result.returncode:
+            child = venv / "bin" / python
+            detail = subprocess.run([str(child), "-m", "ensurepip", "--upgrade", "--default-pip"], env=env, capture_output=True, text=True, timeout=timeout_seconds) if child.exists() else None
+            raise RuntimeError(result.stderr + (detail.stderr if detail else ""))
+        subprocess.run([str(venv / "bin/python"), "-I", "-m", "pip", "--version"], env=env, check=True, timeout=timeout_seconds)
+"""
+
 PNPM_GLOBAL_PROBE = r"""
 import json, os, pathlib, shutil, subprocess, tempfile, uuid
 name = "oi-image-probe-" + uuid.uuid4().hex
@@ -216,6 +235,7 @@ def observed_tool_version(command: str, expected: str, output: str) -> str:
         "bun": r"",
         "pnpm": r"",
         "agent-browser": r"agent-browser\s+",
+        "agento11y": r"v",
         "code-server": r"",
         "ttyd": r"ttyd version\s+",
         "google-chrome": r"Google Chrome(?: for Testing)?\s+",
@@ -240,6 +260,7 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
         ("bun", tools["bun"]),
         ("pnpm", tools["pnpm"]),
         ("agent-browser", tools["agentBrowser"]),
+        ("agento11y", tools["agento11y"]["version"]),
         ("code-server", tools["codeServer"]["version"]),
         ("ttyd", tools["ttyd"]["version"]),
         ("google-chrome", tools["chrome"]["version"]),
@@ -286,6 +307,7 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
     )
     if installed_runtime != plan["runtimeVersion"]:
         raise RuntimeError("Installed runtime manifest does not match the recipe")
+    probe.run(["python3", "-c", PYTHON_VENV_PROBE])
     probe.run(
         [
             "python3",
@@ -302,6 +324,20 @@ def inspect_image(plan: dict[str, Any], tools: dict[str, Any], *, services: bool
             "--input-type=module",
             "-e",
             "const p = await import('/app/opencode-deps/node_modules/@opencode-ai/plugin/dist/index.js'); if (typeof p.tool !== 'function') process.exit(1)",
+        ]
+    )
+    probe.run(
+        [
+            "bun",
+            "-e",
+            "const p = await import('/opt/openinspect/tools/node_modules/@grafana/agento11y-opencode/dist/index.js'); if (typeof p.Agento11yPlugin !== 'function') process.exit(1)",
+        ]
+    )
+    probe.run(
+        [
+            "python3",
+            "-c",
+            "import json; from sandbox_runtime.agent_observability import CLAUDE_PLUGIN; p=json.loads((CLAUDE_PLUGIN / '.claude-plugin/plugin.json').read_text()); assert p['name'] == 'agento11y-claude-code'; assert all(name in p['hooks'] for name in ('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop', 'SessionEnd'))",
         ]
     )
     for command in ("Xvfb", "fluxbox", "x11vnc", "websockify"):

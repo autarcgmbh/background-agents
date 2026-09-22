@@ -258,6 +258,44 @@ class TestOpen:
             await h.harness.open()
 
 
+class TestObservability:
+    @pytest.mark.parametrize("installed", [True, False])
+    async def test_explicit_plugin_survives_isolated_config_and_resume(
+        self, tmp_path, monkeypatch, installed
+    ):
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        from tests.test_agent_observability import CONNECTION
+
+        plugin = tmp_path / "agento11y"
+        if installed:
+            manifest = plugin / ".claude-plugin" / "plugin.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{"name":"agento11y-claude-code"}')
+        monkeypatch.setattr("sandbox_runtime.harness.claude.CLAUDE_PLUGIN", plugin)
+        h = Harness(
+            tmp_path,
+            environ={**CONNECTION, "ANTHROPIC_API_KEY": "sk-ant-key"},
+            transcript_exists=lambda *_: True,
+        )
+        await h.harness.open()
+        await h.harness.create_session()
+        for resume in (False, True):
+            if resume:
+                await h.harness.resume_session("persisted-session")
+            options = ClaudeAgentOptions(**h.harness.build_options("claude-sonnet-4-6", None))
+            assert options.env["CLAUDE_CONFIG_DIR"] == str(h.config.config_dir)
+            assert "test-secret" not in options.settings
+            if installed:
+                assert options.plugins == [{"type": "local", "path": str(plugin)}]
+                assert options.env["AGENTO11Y_AUTH_TOKEN"] == "test-secret"
+                assert options.env["AGENTO11Y_CONTENT_CAPTURE_MODE"] == "full"
+            else:
+                assert not options.plugins
+            if resume:
+                assert options.resume == "persisted-session"
+
+
 class TestSession:
     @pytest.mark.asyncio
     async def test_fresh_session_gets_a_new_id_and_connects_with_session_id(self, tmp_path: Path):
@@ -633,36 +671,6 @@ class TestTranslation:
         assert [e["content"] for e in events if e["type"] == "token"] == ["real answer"]
         assert [e for e in events if e["type"] == "tool"] == []
         assert len([e for e in events if e["type"] == "step_finish"]) == 1
-
-
-class TestUsageAttribution:
-    """Usage carries its model so cost analytics can price it."""
-
-    @pytest.mark.asyncio
-    async def test_step_finish_names_the_turn_model(self, tmp_path: Path) -> None:
-        h = Harness(
-            tmp_path,
-            turns=[[_result(0.10, usage={"input_tokens": 100, "output_tokens": 20})]],
-        )
-        await h.harness.open()
-        await h.harness.create_session()
-        events, _ = await _run(
-            h.harness, HarnessPrompt(message_id="m1", text="a", model="anthropic/claude-opus-5")
-        )
-
-        finish = next(e for e in events if e["type"] == "step_finish")
-        assert finish["model"] == "anthropic/claude-opus-5"
-        assert finish["tokens"] == {"input": 100, "output": 20}
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_the_configured_default_model(self, tmp_path: Path) -> None:
-        h = Harness(tmp_path, turns=[[_result(0.10, usage={"input_tokens": 1})]])
-        await h.harness.open()
-        await h.harness.create_session()
-        events, _ = await _run(h.harness, HarnessPrompt(message_id="m1", text="a"))
-
-        finish = next(e for e in events if e["type"] == "step_finish")
-        assert finish["model"] == "anthropic/claude-sonnet-4-6"
 
 
 class TestCostBaseline:

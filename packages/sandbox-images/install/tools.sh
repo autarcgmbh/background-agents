@@ -16,6 +16,12 @@ cp "$OI_BUNDLE/packages/sandbox-images/locks/plugins/"package*.json /app/opencod
 (cd /app/opencode-deps && npm ci --ignore-scripts --no-audit --no-fund)
 download_dir="$(mktemp -d /tmp/openinspect-tools.XXXXXX)"
 trap 'rm -rf "$download_dir"' EXIT
+download_checked "https://github.com/grafana/agento11y/releases/download/plugins/agento11y/v$AGENTO11Y_VERSION/agento11y_${AGENTO11Y_VERSION}_linux_amd64.tar.gz" "$AGENTO11Y_SHA256" "$download_dir/agento11y.tar.gz"
+tar -xzf "$download_dir/agento11y.tar.gz" -C "$download_dir" agento11y
+install -m 0755 "$download_dir/agento11y" /usr/local/bin/agento11y
+# The SDK loads this local plugin explicitly, including in its isolated CLAUDE_CONFIG_DIR.
+mkdir -p /opt/openinspect/agento11y/claude-code/.claude-plugin
+download_checked "https://raw.githubusercontent.com/grafana/agento11y/plugins/agento11y/v$AGENTO11Y_VERSION/plugins/claude-code/.claude-plugin/plugin.json" "$AGENTO11Y_CLAUDE_PLUGIN_SHA256" /opt/openinspect/agento11y/claude-code/.claude-plugin/plugin.json
 download_checked "https://github.com/vercel-labs/agent-browser/releases/download/v$AGENT_BROWSER_VERSION/agent-browser-linux-x64" "$AGENT_BROWSER_SHA256" "$download_dir/agent-browser"
 install -m 0755 "$download_dir/agent-browser" /usr/local/bin/agent-browser
 download_checked "https://github.com/coder/code-server/releases/download/v$CODE_SERVER_VERSION/code-server-$CODE_SERVER_VERSION-linux-amd64.tar.gz" "$CODE_SERVER_SHA256" "$download_dir/code-server.tar.gz"

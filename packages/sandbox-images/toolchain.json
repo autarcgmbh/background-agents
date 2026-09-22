@@ -6,6 +6,12 @@
     "sha256": "0704631fb3e4f741092e08f55272f90abc3e307f991f05f332924364415b02e0"
   },
   "opencode": "1.18.29",
+  "agento11yOpencode": "0.23.0",
+  "agento11y": {
+    "version": "0.48.0",
+    "sha256": "4f9214b215b908d3d6f3b0c267e5bb2c9396d578d8e882cd82c5c80a834d1163",
+    "claudePluginSha256": "023a126873c07ff4fcea7437893b538cddc7d9bd533eafc58c54c8ca66f85992"
+  },
   "opencodeMinimum": "1.18.15",
   "opencodeMinimumReason": "Earlier releases order turns by wrapped message IDs rather than creation time.",
   "agentBrowser": "0.37.0",

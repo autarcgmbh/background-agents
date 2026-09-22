@@ -17,8 +17,6 @@ import type { SessionStatus } from "@open-inspect/shared/types/sessions";
 import type { SessionRow } from "./types";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { MessageRepository } from "./message-repository";
-import type { EventRepository } from "./event-repository";
-import { totalTokens as modelTotalTokens } from "@open-inspect/shared/model-pricing";
 import type { ArtifactRepository } from "./artifact-repository";
 import type { SessionMessenger } from "./messenger";
 import type { BackgroundTasks } from "../platform-ports";
@@ -38,8 +36,7 @@ export class SessionStatusService {
     private readonly sessionIndex: SessionIndexProjections,
     private readonly statusProjection: Pick<SessionStatusProjectionStore, "project">,
     /** Reaches the parent session's runtime for the child rollup. */
-    private readonly sessions: SessionRuntimeClient,
-    private readonly eventRepository: Pick<EventRepository, "getUsageByModel">
+    private readonly sessions: SessionRuntimeClient
   ) {}
 
   /**
@@ -334,10 +331,6 @@ export class SessionStatusService {
     const session = this.repository.getSession();
     if (!session) return;
 
-    const usageByModel = this.eventRepository.getUsageByModel();
-    const totalTokens = usageByModel
-      ? usageByModel.reduce((sum, entry) => sum + modelTotalTokens(entry.usage), 0)
-      : null;
     const messageCount = this.messageRepository.getMessageCount();
     const activeDurationMs = this.messageRepository.getActiveDurationMs();
     const artifacts = this.artifactRepository.listArtifacts();
@@ -347,8 +340,6 @@ export class SessionStatusService {
       () =>
         this.sessionIndex.updateMetrics(sessionId, {
           totalCost: session.total_cost ?? 0,
-          totalTokens,
-          usageByModel: usageByModel ?? undefined,
           activeDurationMs,
           messageCount,
           prCount,

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from .agent_observability import OPENCODE_PLUGIN, SHUTDOWN_TIMEOUT_SECONDS, observability_env
 from .constants import OPENCODE_PORT
 from .git_excludes import install_runtime_git_excludes
 from .mcp_packages import McpPackageInstaller
@@ -74,6 +75,7 @@ class OpenCodeServer:
         self.mcp_servers = config.mcp_servers
         self._mcp_packages = McpPackageInstaller(log)
         self._opencode_process: asyncio.subprocess.Process | None = None
+        self._observability_enabled = False
 
     def _assemble_workspace_opencode(self, repositories: Sequence[RepoEntry]) -> None:
         """Merge member repos' .opencode/ into the workspace root (multi-repo only).
@@ -482,6 +484,15 @@ class OpenCodeServer:
             },
         }
 
+        telemetry_env = observability_env(os.environ, harness="opencode", log=self.log)
+        if telemetry_env:
+            if OPENCODE_PLUGIN.is_file():
+                opencode_config["plugin"] = [OPENCODE_PLUGIN.as_uri()]
+            else:
+                self.log.warn("agento11y.plugin_missing", harness="opencode")
+                telemetry_env = {}
+        self._observability_enabled = bool(telemetry_env)
+
         # Inject MCP servers
         mcp_servers = self._resolve_mcp_servers()
         mcp_config: dict[str, dict[str, Any]] = {}
@@ -539,6 +550,7 @@ class OpenCodeServer:
 
         env = {
             **os.environ,
+            **telemetry_env,
             "OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config),
             # Disable OpenCode's question tool in headless mode. The tool blocks
             # on a Promise waiting for user input via the HTTP API, but the bridge
@@ -610,6 +622,16 @@ class OpenCodeServer:
 
     async def stop(self) -> None:
         if self._opencode_process and self._opencode_process.returncode is None:
+            if self._observability_enabled:
+                # SIGTERM alone does not run the plugin's async dispose hook.
+                try:
+                    async with httpx.AsyncClient(timeout=SHUTDOWN_TIMEOUT_SECONDS) as client:
+                        response = await client.post(
+                            f"http://localhost:{OPENCODE_PORT}/global/dispose"
+                        )
+                        response.raise_for_status()
+                except Exception as error:
+                    self.log.warn("agento11y.dispose_failed", error_type=type(error).__name__)
             with contextlib.suppress(ProcessLookupError):
                 self._opencode_process.terminate()
             try:

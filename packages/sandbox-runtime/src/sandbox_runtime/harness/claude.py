@@ -34,6 +34,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from ..agent_observability import CLAUDE_PLUGIN, observability_env
 from ..credentials.provider_credential_client import (
     RuntimeCredentialClient,
     RuntimeCredentialDenied,
@@ -157,10 +158,6 @@ class _TurnState:
     # None: the previous turn reported no running total, so the next total
     # cannot be split between the two turns.
     cost_baseline: float | None
-    # Catalog id of the model running this turn, reported with its usage so
-    # cost analytics can price the tokens. Every Claude-harness turn runs one
-    # model, unlike OpenCode where a subagent may run another.
-    model_id: str = ""
     texts: list[_MessageText] = field(default_factory=list)
     last_token_content: str = ""
     tool_names: dict[str, str] = field(default_factory=dict)
@@ -411,6 +408,13 @@ class ClaudeHarness:
             "forward_subagent_text": False,
             **reasoning_options(model, reasoning_effort),
         }
+        telemetry_env = observability_env(self.environ, harness="claude", log=self.log)
+        if telemetry_env:
+            if (CLAUDE_PLUGIN / ".claude-plugin" / "plugin.json").is_file():
+                kwargs["plugins"] = [{"type": "local", "path": str(CLAUDE_PLUGIN)}]
+                kwargs["env"].update(telemetry_env)
+            else:
+                self.log.warn("agento11y.plugin_missing", harness="claude")
         if self._resume_on_connect:
             kwargs["resume"] = self.session_id
         else:
@@ -503,11 +507,7 @@ class ClaudeHarness:
             return TurnOutcome.failed(f"Claude agent failed to start: {error}")
 
         self._interrupted = False
-        state = _TurnState(
-            message_id=prompt.message_id,
-            cost_baseline=self._cost_baseline,
-            model_id=f"anthropic/{model}",
-        )
+        state = _TurnState(message_id=prompt.message_id, cost_baseline=self._cost_baseline)
         try:
             async with asyncio.timeout_at(deadline):
                 await client.query(self._user_messages(prompt))
@@ -795,8 +795,6 @@ class ClaudeHarness:
             tokens = _usage_tokens(message.usage)
             if tokens:
                 finish["tokens"] = tokens
-            if state.model_id:
-                finish["model"] = state.model_id
             events.append(finish)
             if self._interrupted:
                 return events, TurnOutcome(

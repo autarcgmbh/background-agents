@@ -56,10 +56,6 @@ export function AnalyticsSummaryCards({ days, summary, loading }: SummaryCardsPr
     ["archived", summary.statusBreakdown.archived, "bg-muted-foreground"],
   ] as const;
 
-  // Prefer the computed value: on a subscription seat the provider reports no
-  // cost at all, so `totalCost` is zero for real work.
-  const computedCost = summary.computedCost;
-
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -74,28 +70,14 @@ export function AnalyticsSummaryCards({ days, summary, loading }: SummaryCardsPr
           hint="Distinct SCM logins"
         />
         <SummaryCard
-          label="Token Cost"
-          value={formatSessionCost(computedCost?.costUsd ?? summary.totalCost)}
-          hint={
-            computedCost
-              ? computedCost.hasUnpricedModels
-                ? "At list prices; excludes unpriced models"
-                : "Tokens spent, at list prices"
-              : "Reported by the provider"
-          }
+          label="Total Cost"
+          value={formatSessionCost(summary.totalCost)}
+          hint="Summed across sessions"
         />
         <SummaryCard
-          label="Avg / Session"
-          value={formatSessionCost(
-            summary.totalSessions > 0
-              ? (computedCost?.costUsd ?? summary.totalCost) / summary.totalSessions
-              : 0
-          )}
-          hint={
-            computedCost && summary.totalCost === 0
-              ? "Provider reported no cost (seat billing)"
-              : "Average per session"
-          }
+          label="Avg Cost / Session"
+          value={formatSessionCost(summary.avgCost)}
+          hint="Average per session"
         />
       </div>
 

@@ -69,10 +69,6 @@ class _PromptState:
     pending_drop_logged: bool = False
     child_activity: ChildActivityCorrelator = field(default_factory=ChildActivityCorrelator)
     emitted_error_messages: set[str] = field(default_factory=set)
-    # Model id (``provider/model``) per OpenCode assistant message id. A
-    # step-finish names only its message, but cost analytics has to attribute
-    # the tokens to a model, and a subagent may run a different one.
-    message_models: dict[str, str] = field(default_factory=dict)
     # Priced step costs keyed by OpenCode part id. Last write wins, so a part
     # OpenCode re-emits with a corrected cost replaces its earlier value.
     step_costs: dict[str, float] = field(default_factory=dict)
@@ -391,17 +387,6 @@ class OpenCodePromptStream:
         info = props.get("info", {})
         msg_session_id = info.get("sessionID")
 
-        # Before the parent-session filter on purpose. A subagent runs in its
-        # own OpenCode session and may run a different model, but its steps are
-        # still this session's spend, so its usage has to be attributable too.
-        # Keyed by message id, which is unique across sessions.
-        if info.get("role") == "assistant" and info.get("id") and info.get("modelID"):
-            provider_id = info.get("providerID")
-            model_id = info["modelID"]
-            state.message_models[info["id"]] = (
-                f"{provider_id}/{model_id}" if provider_id else str(model_id)
-            )
-
         if msg_session_id == state.opencode_session_id:
             oc_msg_id = info.get("id", "")
             parent_id = info.get("parentID", "")
@@ -688,11 +673,6 @@ class OpenCodePromptStream:
                 "messageId": state.message_id,
                 "messageCostUsd": state.message_cost_usd(),
             }
-            if part.get("id"):
-                finish_event["stepId"] = part["id"]
-            model_id = state.message_models.get(part.get("messageID", ""))
-            if model_id:
-                finish_event["model"] = model_id
             if cost is not None:
                 finish_event["cost"] = cost
             events.append(finish_event)

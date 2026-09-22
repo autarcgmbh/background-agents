@@ -211,6 +211,20 @@ export class UserEnvResolver {
       brokerSecrets: managedSecrets,
       providerAuthModes,
     });
+    if (sandboxEnv.AGENTO11Y_ENDPOINT?.trim() && !sandboxEnv.AGENTO11Y_USER_ID?.trim()) {
+      // Attribute the sandbox to its session creator, not the image's shared OS user.
+      // This is optional telemetry enrichment and must not prevent a session from starting.
+      sandboxEnv.AGENTO11Y_USER_ID = "unknown";
+      try {
+        const creator = await db
+          .prepare("SELECT user_id, scm_login FROM sessions WHERE id = ?")
+          .bind(resolvePublicSessionId(session, this.durableObjectId))
+          .first<{ user_id: string | null; scm_login: string | null }>();
+        sandboxEnv.AGENTO11Y_USER_ID = creator?.user_id || creator?.scm_login || "unknown";
+      } catch {
+        this.log.warn("agento11y.user_attribution_unavailable");
+      }
+    }
     return { sandboxEnv, providerAuthModes, providerAccountIds };
   }
 

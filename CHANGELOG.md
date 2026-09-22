@@ -2,6 +2,14 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 21, 2026
+
+**Grafana Agent Observability.** OpenCode and Claude sandboxes now support Grafana's pinned
+coding-agent integrations with full conversation capture, token usage, tool activity, and OTLP
+traces/metrics. Configure the connection through Settings → Secrets. This replaces the fork's
+per-session token tables and custom model pricing; upstream session and PR analytics continue to use
+provider-reported costs. See [setup and verification](docs/AGENT_OBSERVABILITY.md).
+
 ## September 18, 2026
 
 **Cost per session.** Analytics now values every session's tokens at published list prices, so a

@@ -33,8 +33,8 @@ it("leaves the dedicated PR funnel as the only top-level PR-created metric", () 
 
   expect(screen.getByText("Total Sessions")).toBeInTheDocument();
   expect(screen.getByText("Active Users")).toBeInTheDocument();
-  expect(screen.getByText("Token Cost")).toBeInTheDocument();
-  expect(screen.getByText("Avg / Session")).toBeInTheDocument();
+  expect(screen.getByText("Total Cost")).toBeInTheDocument();
+  expect(screen.getByText("Avg Cost / Session")).toBeInTheDocument();
   expect(screen.queryByText("PRs Created")).not.toBeInTheDocument();
   expect(screen.queryByText("99")).not.toBeInTheDocument();
 });
