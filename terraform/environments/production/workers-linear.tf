@@ -42,6 +42,7 @@ module "linear_bot_worker" {
   plain_text_bindings = {
     CONTROL_PLANE_URL    = { value = local.control_plane_url }
     WEB_APP_URL          = { value = local.web_app_url }
+    GRAFANA_URL          = { value = var.grafana_url }
     DEPLOYMENT_NAME      = { value = var.deployment_name }
     APP_NAME             = { value = var.app_name }
     DEFAULT_MODEL        = { value = var.linear_bot_default_model }

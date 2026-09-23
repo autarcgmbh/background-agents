@@ -431,6 +431,7 @@ export class CallbackNotificationService {
       }
 
       const timestamp = Date.now();
+      const session = this.repository.getSession();
       const callbackData = {
         sessionId,
         messageId,
@@ -438,6 +439,12 @@ export class CallbackNotificationService {
         ...(error != null ? { error } : {}),
         ...(source === "linear" && options.terminationReason !== undefined
           ? { terminationReason: options.terminationReason }
+          : {}),
+        // Lets Linear link the turn at its Grafana conversation. Only known
+        // once the agent has opened one, which a turn that failed to start
+        // never did.
+        ...(source === "linear" && session?.agent_session_id
+          ? { agentConversationId: session.agent_session_id }
           : {}),
         timestamp,
         context: rawContext,

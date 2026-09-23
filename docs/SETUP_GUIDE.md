@@ -92,6 +92,10 @@ SERVICE_AUTH_SECRET=your_web_service_secret
 # after changing them.
 NEXT_PUBLIC_APP_NAME=Open-Inspect
 NEXT_PUBLIC_APP_ICON_URL=
+
+# Optional Grafana stack origin. Set it to link sessions to their Grafana
+# Agent Observability conversation (docs/AGENT_OBSERVABILITY.md).
+NEXT_PUBLIC_GRAFANA_URL=
 ```
 
 Do not commit `packages/web/.env.local`.

@@ -73,6 +73,9 @@ export class SessionSandboxEventProcessor {
       case "ready":
         await this.runtime.handleReady(event, context);
         return;
+      case "agent_session":
+        this.runtime.handleAgentSession(event);
+        return;
       case "boot_progress":
         this.runtime.handleBootProgress(event, context);
         return;

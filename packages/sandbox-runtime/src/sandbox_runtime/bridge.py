@@ -1127,6 +1127,12 @@ class AgentBridge:
                 self.session_id_file.write_text(session_id)
             except Exception as e:
                 self.log.error("agent.session.save_error", exc=e)
+            # Announced from here because this is the one place every path to a
+            # known id passes through: startup resume, first-prompt creation,
+            # and a mid-connection rotation. The `ready` event can only carry an
+            # id the harness already had, so a fresh conversation reaches the
+            # control plane through this event alone.
+            await self._send_event({"type": "agent_session", "agentSessionId": session_id})
 
     @staticmethod
     def _record_fatal_error(message: str) -> None:

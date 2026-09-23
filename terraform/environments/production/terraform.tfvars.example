@@ -322,6 +322,13 @@ project_root = "../../../"
 #          "https://cdn.example.com/logo.svg".
 # app_icon_url = ""
 
+# Optional Grafana stack origin. When set, sessions link to their Grafana Agent
+# Observability conversation from the session details sidebar and from the
+# external links on their Linear agent session. Requires the AGENTO11Y_* secrets
+# to be configured too — see docs/AGENT_OBSERVABILITY.md.
+# Example: "https://mystack.grafana.net"
+# grafana_url = ""
+
 # Override the R2 media bucket name (optional)
 # Defaults to "open-inspect-media-<deployment_name>" when left empty.
 # Set this when the bucket must be pre-created out-of-band — for example, when

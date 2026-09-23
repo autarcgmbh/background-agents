@@ -32,6 +32,13 @@ const sessionStateSchema = z.object({
    * an absent value.
    */
   harness: harnessIdSchema.default(DEFAULT_HARNESS),
+  /**
+   * The agent's own conversation id, once the runtime has created or resumed
+   * one. Null until the first prompt: the harness creates its conversation
+   * lazily. Also the id the Grafana Agent Observability integration records a
+   * conversation under, which is what makes a session deep-linkable there.
+   */
+  agentSessionId: z.string().nullable().optional(),
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   isProcessing: z.boolean().optional(),
@@ -218,6 +225,9 @@ const serverMessageUnionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("tunnel_urls"), urls: z.record(z.string(), z.string()) }),
   z.object({ type: z.literal("sandbox_dashboard_url"), url: z.string() }),
+  // The agent conversation id became known (first prompt) or rotated (a
+  // conversation reset). Clients that deep-link into it re-render on this.
+  z.object({ type: z.literal("agent_session"), agentSessionId: z.string() }),
   z.object({ type: z.literal("sandbox_access_changed") }),
   z.object({
     type: z.literal("error"),

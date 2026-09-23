@@ -124,6 +124,7 @@ class TestSessionIdentity:
     async def test_first_prompt_creates_the_session_the_harness_owns(self, tmp_path: Path) -> None:
         harness = ScriptedHarness(session_id=None)
         bridge = _bridge(harness)
+        bridge._send_event = AsyncMock()
         bridge.session_id_file = tmp_path / "agent-session-id"
 
         await bridge._ensure_agent_session()
@@ -131,6 +132,30 @@ class TestSessionIdentity:
 
         assert bridge.agent_session_id == harness.session_id == "oc-session-new"
         assert bridge.session_id_file.read_text() == "oc-session-new"
+        # The control plane learns the conversation id here: `ready` went out
+        # before it existed, so this event is the only thing that carries it.
+        assert [call.args[0] for call in bridge._send_event.await_args_list] == [
+            {"type": "agent_session", "agentSessionId": "oc-session-new"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_conversation_id_that_cannot_be_written_is_still_announced(
+        self, tmp_path: Path
+    ) -> None:
+        # The file only matters to a snapshot restore; the link and the session
+        # API read the id from the control plane, so a write failure must not
+        # swallow the announcement.
+        harness = ScriptedHarness(session_id=None)
+        bridge = _bridge(harness)
+        bridge._send_event = AsyncMock()
+        bridge.session_id_file = tmp_path / "missing-dir" / "agent-session-id"
+
+        await bridge._ensure_agent_session()
+
+        bridge.log.error.assert_called_once()
+        assert [call.args[0] for call in bridge._send_event.await_args_list] == [
+            {"type": "agent_session", "agentSessionId": "oc-session-new"}
+        ]
 
     @pytest.mark.asyncio
     async def test_an_id_rotated_during_a_turn_is_persisted(self, tmp_path: Path) -> None:
@@ -161,6 +186,13 @@ class TestSessionIdentity:
         await task
 
         assert bridge.session_id_file.read_text() == "rotated-id"
+        # A reset rotates the conversation, so the link has to follow it.
+        announced = [
+            call.args[0]
+            for call in bridge._send_event.await_args_list
+            if call.args[0].get("type") == "agent_session"
+        ]
+        assert announced == [{"type": "agent_session", "agentSessionId": "rotated-id"}]
 
 
 class TestHarnessContracts:

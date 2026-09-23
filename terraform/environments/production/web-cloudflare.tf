@@ -20,6 +20,7 @@ resource "null_resource" "web_app_cloudflare_build" {
       NEXT_PUBLIC_SANDBOX_PROVIDER = var.sandbox_provider
       NEXT_PUBLIC_APP_NAME         = var.app_name
       NEXT_PUBLIC_APP_ICON_URL     = var.app_icon_url
+      NEXT_PUBLIC_GRAFANA_URL      = var.grafana_url
     }
   }
 }
@@ -70,6 +71,7 @@ resource "local_file" "web_app_wrangler_production" {
     NEXT_PUBLIC_SANDBOX_PROVIDER = "${var.sandbox_provider}"
     NEXT_PUBLIC_APP_NAME = "${var.app_name}"
     NEXT_PUBLIC_APP_ICON_URL = "${var.app_icon_url}"
+    NEXT_PUBLIC_GRAFANA_URL = "${var.grafana_url}"
 
     [assets]
     directory = ".open-next/assets"

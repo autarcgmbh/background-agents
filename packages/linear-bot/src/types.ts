@@ -21,6 +21,12 @@ export interface Env {
   WEB_APP_URL: string;
   DEFAULT_MODEL: string;
   APP_NAME?: string;
+  /**
+   * Grafana stack origin. Present only when the deployment exports to Grafana
+   * Agent Observability; absent leaves the conversation link off the Linear
+   * agent session. See docs/AGENT_OBSERVABILITY.md.
+   */
+  GRAFANA_URL?: string;
 
   // OAuth app credentials
   LINEAR_CLIENT_ID: string;

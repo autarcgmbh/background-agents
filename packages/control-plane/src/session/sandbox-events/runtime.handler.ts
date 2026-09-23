@@ -74,6 +74,12 @@ export class SandboxRuntimeEventHandler {
         reported_harness: event.harness,
       });
     }
+    // A restored or reconnecting bridge already holds a conversation and
+    // reports it here; a fresh one has none yet and sends `agent_session`
+    // once the first prompt creates it.
+    if (event.opencodeSessionId) {
+      this.recordAgentSessionId(event.opencodeSessionId);
+    }
     this.diffService.pinBaselines(event);
     // Fills the column a fresh spawn cleared; a restore has already seeded
     // the snapshot's version, which outranks whatever this sandbox reports.
@@ -103,6 +109,26 @@ export class SandboxRuntimeEventHandler {
     // a bridge is attached (the disconnect check armed at attach, re-armed by
     // every alarm run), and the scheduler keeps the earlier deadline.
     await this.scheduleInactivityCheck();
+  }
+
+  /**
+   * The agent conversation id, reported when the runtime creates one (first
+   * prompt), resumes a persisted one, or rotates it after a conversation
+   * reset. Session metadata only: nothing gates on it, and the session API
+   * and the Grafana Agent Observability deep link both read it from here.
+   */
+  handleAgentSession(event: Extract<SandboxEvent, { type: "agent_session" }>): void {
+    this.recordAgentSessionId(event.agentSessionId);
+  }
+
+  /** Persist the conversation id and publish it, skipping unchanged repeats. */
+  private recordAgentSessionId(agentSessionId: string): void {
+    if (!this.repository.setAgentSessionId(agentSessionId)) return;
+    this.log.info("sandbox.agent_session", {
+      event: "sandbox.agent_session",
+      agent_session_id: agentSessionId,
+    });
+    this.messenger.broadcast({ type: "agent_session", agentSessionId });
   }
 
   /**

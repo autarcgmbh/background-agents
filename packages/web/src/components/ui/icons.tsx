@@ -610,6 +610,27 @@ export function BoltIcon({ className, ...props }: IconProps) {
   );
 }
 
+/** Observability cue: a pulse trace, used for the Grafana conversation link. */
+export function ActivityIcon({ className, ...props }: IconProps) {
+  return (
+    <svg
+      className={className}
+      data-testid="activity-icon"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      {...props}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M3 12h3.5l2.5-7 4 14 2.5-7H21"
+      />
+    </svg>
+  );
+}
+
 export function GlobeIcon({ className }: IconProps) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">

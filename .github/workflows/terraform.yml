@@ -207,7 +207,17 @@ jobs:
         run: |
           terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
           echo "plan<<EOF" >> $GITHUB_OUTPUT
-          cat plan_output.txt | head -c 60000 >> $GITHUB_OUTPUT
+          # Both halves of this guard the same case: a plan too big to post
+          # whole. A worker bundle lands in the diff as inline base64, so any
+          # plan that replaces one runs to megabytes, and every such run used
+          # to fail on a plan that had actually succeeded.
+          #   - Read the head directly rather than `cat … | head`: head closes
+          #     the pipe at its byte budget, cat takes SIGPIPE, and the default
+          #     shell's -o pipefail turns that into a step failure.
+          #   - Force a trailing newline: head -c can cut mid-line, and a
+          #     delimiter appended to a partial line is never matched
+          #     ("Invalid value. Matching delimiter not found").
+          { head -c 60000 plan_output.txt; echo; } >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
         working-directory: ${{ env.TF_WORKING_DIR }}
         continue-on-error: true
@@ -257,6 +267,7 @@ jobs:
           TF_VAR_github_bot_default_model: "${{ vars.GH_BOT_DEFAULT_MODEL || secrets.GH_BOT_DEFAULT_MODEL || 'anthropic/claude-haiku-4-5' }}"
           TF_VAR_app_name: "${{ vars.APP_NAME || secrets.APP_NAME || 'Open-Inspect' }}"
           TF_VAR_app_icon_url: ${{ vars.APP_ICON_URL || secrets.APP_ICON_URL }}
+          TF_VAR_grafana_url: ${{ vars.GRAFANA_URL || secrets.GRAFANA_URL }}
           TF_VAR_enable_linear_bot: "${{ vars.ENABLE_LINEAR_BOT || secrets.ENABLE_LINEAR_BOT || 'false' }}"
           TF_VAR_linear_client_id: ${{ vars.LINEAR_CLIENT_ID || secrets.LINEAR_CLIENT_ID }}
           TF_VAR_linear_client_secret: ${{ secrets.LINEAR_CLIENT_SECRET }}
@@ -444,6 +455,7 @@ jobs:
           TF_VAR_github_bot_default_model: "${{ vars.GH_BOT_DEFAULT_MODEL || secrets.GH_BOT_DEFAULT_MODEL || 'anthropic/claude-haiku-4-5' }}"
           TF_VAR_app_name: "${{ vars.APP_NAME || secrets.APP_NAME || 'Open-Inspect' }}"
           TF_VAR_app_icon_url: ${{ vars.APP_ICON_URL || secrets.APP_ICON_URL }}
+          TF_VAR_grafana_url: ${{ vars.GRAFANA_URL || secrets.GRAFANA_URL }}
           TF_VAR_enable_linear_bot: "${{ vars.ENABLE_LINEAR_BOT || secrets.ENABLE_LINEAR_BOT || 'false' }}"
           TF_VAR_linear_client_id: ${{ vars.LINEAR_CLIENT_ID || secrets.LINEAR_CLIENT_ID }}
           TF_VAR_linear_client_secret: ${{ secrets.LINEAR_CLIENT_SECRET }}

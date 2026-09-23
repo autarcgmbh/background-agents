@@ -698,6 +698,12 @@ variable "app_icon_url" {
   default     = ""
 }
 
+variable "grafana_url" {
+  description = "Optional Grafana stack origin (e.g. https://mystack.grafana.net). When set, sessions link to their Grafana Agent Observability conversation from the web UI and from Linear agent sessions; see docs/AGENT_OBSERVABILITY.md. Leave empty to omit the link."
+  type        = string
+  default     = ""
+}
+
 variable "enable_durable_object_bindings" {
   description = "Enable DO bindings. For initial deployment: set to false (applies migrations), then set to true (adds bindings)."
   type        = bool

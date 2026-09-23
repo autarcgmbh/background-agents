@@ -293,6 +293,12 @@ function reduceServerMessage(
     case "sandbox_dashboard_url":
       return updateSessionState(state, (prev) => ({ ...prev, sandboxDashboardUrl: message.url }));
 
+    case "agent_session":
+      return updateSessionState(state, (prev) => ({
+        ...prev,
+        agentSessionId: message.agentSessionId,
+      }));
+
     case "artifact_created":
     case "artifact_updated":
       // Upsert-by-id: a create appends, an update replaces in place so the

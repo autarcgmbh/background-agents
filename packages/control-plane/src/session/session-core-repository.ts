@@ -142,6 +142,21 @@ export class SessionCoreRepository {
     this.sql.exec(`UPDATE session SET branch_name = ? WHERE id = ?`, branchName, sessionId);
   }
 
+  /**
+   * Record the agent's conversation id, reported by the runtime when it
+   * creates, resumes, or rotates one. Returns whether the value changed, so
+   * the caller can skip the broadcast on the repeats a reconnect produces.
+   */
+  setAgentSessionId(agentSessionId: string): boolean {
+    const session = this.getSession();
+    if (!session || session.agent_session_id === agentSessionId) return false;
+    this.sql.exec(
+      `UPDATE session SET agent_session_id = ? WHERE id = (SELECT id FROM session LIMIT 1)`,
+      agentSessionId
+    );
+    return true;
+  }
+
   updateSessionCurrentSha(sha: string): void {
     // Each session DO has exactly one session row.
     this.sql.exec(

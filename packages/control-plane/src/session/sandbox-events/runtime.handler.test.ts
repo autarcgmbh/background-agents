@@ -17,7 +17,10 @@ function createHandler() {
     markSandboxReady: vi.fn(() => true),
     recordBootProgress: vi.fn(() => true),
   };
-  const repository = { getSession: vi.fn(() => ({ harness: "opencode" })) };
+  const repository = {
+    getSession: vi.fn(() => ({ harness: "opencode" })),
+    setAgentSessionId: vi.fn(() => true),
+  };
   const eventRepository = { createEvent: vi.fn() };
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const messenger = { broadcast, sendToSandbox: vi.fn(async () => {}) };
@@ -44,6 +47,7 @@ function createHandler() {
   );
   return {
     handler,
+    repository,
     sandboxRepository,
     eventRepository,
     broadcast,
@@ -219,5 +223,53 @@ describe("SandboxRuntimeEventHandler.handleBootProgress", () => {
       expect.objectContaining({ status: "completed", warning: true }),
       3
     );
+  });
+});
+
+describe("agent conversation id", () => {
+  it("records and publishes the id a restored bridge reports on ready", async () => {
+    const h = createHandler();
+
+    await h.handler.handleReady({ ...readyEvent, opencodeSessionId: "conv-1" }, context);
+
+    expect(h.repository.setAgentSessionId).toHaveBeenCalledWith("conv-1");
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "agent_session", agentSessionId: "conv-1" });
+  });
+
+  it("leaves the id alone when a fresh bridge reports none", async () => {
+    const h = createHandler();
+
+    await h.handler.handleReady(readyEvent, context);
+
+    expect(h.repository.setAgentSessionId).not.toHaveBeenCalled();
+  });
+
+  it("records and publishes the id the runtime reports once it has one", () => {
+    const h = createHandler();
+
+    h.handler.handleAgentSession({
+      type: "agent_session",
+      agentSessionId: "conv-2",
+      sandboxId: "sb-1",
+      timestamp: 6,
+    });
+
+    expect(h.repository.setAgentSessionId).toHaveBeenCalledWith("conv-2");
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "agent_session", agentSessionId: "conv-2" });
+  });
+
+  it("stays quiet on the repeats a reconnect produces", () => {
+    const h = createHandler();
+    // The repository reports "unchanged" for an id the session already holds.
+    h.repository.setAgentSessionId.mockReturnValue(false);
+
+    h.handler.handleAgentSession({
+      type: "agent_session",
+      agentSessionId: "conv-2",
+      sandboxId: "sb-1",
+      timestamp: 6,
+    });
+
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 });

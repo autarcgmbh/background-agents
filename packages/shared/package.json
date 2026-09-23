@@ -94,6 +94,10 @@
       "import": "./dist/sign-in-provider.js",
       "types": "./dist/sign-in-provider.d.ts"
     },
+    "./grafana": {
+      "import": "./dist/grafana.js",
+      "types": "./dist/grafana.d.ts"
+    },
     "./git": {
       "import": "./dist/git.js",
       "types": "./dist/git.d.ts"

@@ -71,12 +71,38 @@ These tags reach conversations, traces, and client token/latency metrics. Grafan
 filter cost panels with `gen_ai_agent_name=~"open-inspect-.*"` (or your configured agent names).
 
 The plugins use the underlying agent conversation ID. Open-Inspect's session API exposes that ID as
-`agentSessionId`, so you can use it to find the corresponding Grafana conversation. Resuming the
-same agent session keeps its ID; a conversation reset creates a new one. Subagent capture and
-parent-generation links are handled by the official plugins.
+`agentSessionId`, so you can use it to find the corresponding Grafana conversation. The runtime
+reports the ID as soon as it creates, resumes, or rotates a conversation — a fresh session has none
+until its first prompt, because the harness creates the conversation lazily. Resuming the same agent
+session keeps its ID; a conversation reset creates a new one. Subagent capture and parent-generation
+links are handled by the official plugins.
 
 No historical backfill runs automatically. The old `sessions.total_tokens` column and
 `session_model_usage` table remain as historical data; new sessions no longer update or query them.
+
+## Open in Grafana
+
+Set the `grafana_url` Terraform variable to your stack origin, for example
+`https://mystack.grafana.net`. Sessions then link straight at their Grafana conversation:
+
+```
+<grafana_url>/a/grafana-agento11y-app/conversations/<agentSessionId>
+```
+
+Terraform passes it to the web app as `NEXT_PUBLIC_GRAFANA_URL` and to the Linear bot as
+`GRAFANA_URL`. Only the origin matters: a URL pasted with a path (the setup page, say) is reduced to
+its origin, so you can copy it straight out of the address bar.
+
+Two surfaces carry the link:
+
+- **Session details sidebar** — an **Open in Grafana** row, next to the model and branch metadata.
+- **Linear agent sessions** — a **Grafana** entry in the session's external links, published
+  alongside **View Session** and **Pull Request** when a turn finishes.
+
+`NEXT_PUBLIC_*` vars are inlined into the client bundle at build time, so rebuild the web app after
+changing the value. The link appears only once the session has an agent conversation ID, so a
+session that has not been prompted yet shows none. Leaving the variable empty omits the link
+everywhere, which is what a deployment that exports nothing to Grafana wants.
 
 ## Verify and diagnose
 
