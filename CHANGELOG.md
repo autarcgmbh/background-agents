@@ -2,6 +2,11 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 23, 2026
+
+**Latest Anthropic and OpenAI models.** Adds Claude Opus 5.5, GPT-6 Sol, and GPT-6 Luna to the model
+picker and integrations. Connected ChatGPT accounts can use both new GPT-6 models.
+
 ## September 22, 2026
 
 **Round-robin ChatGPT accounts.** A provider default can now rotate: with **Rotate accounts across
